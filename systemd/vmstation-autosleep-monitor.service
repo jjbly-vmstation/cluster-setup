@@ -1,0 +1,52 @@
+# VMStation Auto-Sleep Monitor Service
+# This service monitors node activity and initiates sleep when idle.
+#
+# Installation:
+#   sudo cp vmstation-autosleep-monitor.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable vmstation-autosleep-monitor.service
+#   sudo systemctl start vmstation-autosleep-monitor.service
+
+[Unit]
+Description=VMStation Auto-Sleep Monitor
+Documentation=https://github.com/jjbly-vmstation/cluster-setup
+After=network.target
+After=kubelet.service
+Wants=network-online.target
+
+# Don't start if this is a control-plane node (optional)
+# ConditionPathExists=!/var/lib/kubernetes/control-plane
+
+[Service]
+Type=simple
+ExecStart=/opt/vmstation/autosleep/vmstation-autosleep-monitor.sh start
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=30
+
+# Environment configuration
+Environment="CONFIG_FILE=/etc/vmstation/autosleep/autosleep.conf"
+Environment="STATE_FILE=/var/lib/vmstation/autosleep/state"
+Environment="LOG_FILE=/var/log/vmstation/autosleep.log"
+Environment="INACTIVITY_TIMEOUT_MINUTES=120"
+Environment="CHECK_INTERVAL_MINUTES=5"
+Environment="GRACE_PERIOD_MINUTES=10"
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/vmstation /var/log/vmstation
+PrivateTmp=yes
+
+# Resource limits
+MemoryMax=128M
+CPUQuota=10%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vmstation-autosleep
+
+[Install]
+WantedBy=multi-user.target
