@@ -1,0 +1,25 @@
+# {{ ansible_managed }}
+# VMStation Auto-Sleep Timer
+# Deployed to: /etc/systemd/system/vmstation-autosleep.timer
+
+[Unit]
+Description=VMStation Auto-Sleep Check Timer
+Documentation=https://github.com/jjbly-vmstation/cluster-setup
+Requires=vmstation-autosleep-check.service
+
+[Timer]
+# Run every {{ autosleep_check_interval_minutes | default(5) }} minutes
+OnBootSec=5min
+OnUnitActiveSec={{ autosleep_check_interval_minutes | default(5) }}min
+
+# Add randomized delay to prevent synchronized checks across cluster
+RandomizedDelaySec=30
+
+# Persist timer across reboots
+Persistent=true
+
+# Don't catch up on missed runs
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

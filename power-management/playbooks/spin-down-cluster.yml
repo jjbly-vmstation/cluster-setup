@@ -1,0 +1,369 @@
+---
+# spin-down-cluster.yml - Gracefully shutdown the cluster
+# Part of VMStation Power Management
+#
+# This playbook performs a graceful cluster shutdown:
+# - Cordon all nodes (prevent new workloads)
+# - Drain workloads from worker nodes
+# - Scale down deployments
+# - Preserve state
+# - Shutdown nodes in proper order
+#
+# Usage:
+#   ansible-playbook -i inventory/hosts.yml power-management/playbooks/spin-down-cluster.yml
+#   ansible-playbook -i inventory/hosts.yml power-management/playbooks/spin-down-cluster.yml --check  # Dry run
+
+- name: Spin Down Cluster - Cordon and Drain
+  hosts: masters[0]
+  become: true
+  gather_facts: true
+  
+  vars:
+    # Drain settings
+    drain_timeout: "{{ drain_timeout_seconds | default(300) }}"
+    drain_grace_period: "{{ drain_grace_period_seconds | default(30) }}"
+    force_drain: "{{ force_drain | default(false) }}"
+    
+    # State preservation
+    state_dir: /var/lib/vmstation/cluster-state
+    
+    # Shutdown order (reversed for startup)
+    shutdown_order:
+      - workers
+      - storage
+      - masters
+      
+    # Namespaces to scale down (in order)
+    scale_down_namespaces:
+      - default
+      - apps
+
+  tasks:
+    - name: Display shutdown information
+      ansible.builtin.debug:
+        msg: |
+          Initiating graceful cluster shutdown
+          Drain timeout: {{ drain_timeout }}s
+          Force drain: {{ force_drain }}
+          
+          Shutdown order: {{ shutdown_order | join(' -> ') }}
+      tags:
+        - info
+
+    # Create state directory
+    - name: Create state preservation directory
+      ansible.builtin.file:
+        path: "{{ state_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      tags:
+        - state
+
+    # Preserve current state
+    - name: Save current deployment states
+      ansible.builtin.shell: |
+        kubectl get deployments --all-namespaces -o json > "{{ state_dir }}/deployments.json"
+        kubectl get statefulsets --all-namespaces -o json > "{{ state_dir }}/statefulsets.json"
+        kubectl get daemonsets --all-namespaces -o json > "{{ state_dir }}/daemonsets.json"
+      changed_when: true
+      tags:
+        - state
+
+    - name: Save node states
+      ansible.builtin.shell: |
+        kubectl get nodes -o json > "{{ state_dir }}/nodes.json"
+      changed_when: true
+      tags:
+        - state
+
+    - name: Record shutdown timestamp
+      ansible.builtin.copy:
+        content: |
+          SHUTDOWN_TIME={{ ansible_date_time.epoch }}
+          SHUTDOWN_DATE={{ ansible_date_time.iso8601 }}
+          INITIATED_BY={{ ansible_user_id }}
+        dest: "{{ state_dir }}/shutdown.info"
+        mode: "0644"
+      tags:
+        - state
+
+    # Cordon all worker nodes
+    - name: Cordon all worker nodes
+      ansible.builtin.command: kubectl cordon {{ item }}
+      loop: "{{ groups['workers'] | default([]) }}"
+      register: cordon_result
+      changed_when: "'cordoned' in cordon_result.stdout"
+      failed_when: false
+      tags:
+        - cordon
+
+    # Scale down deployments
+    - name: Get deployments in scalable namespaces
+      ansible.builtin.command: >
+        kubectl get deployments -n {{ item }} -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'
+      loop: "{{ scale_down_namespaces }}"
+      register: deployments
+      changed_when: false
+      failed_when: false
+      tags:
+        - scale
+
+    - name: Scale deployments to zero
+      ansible.builtin.command: >
+        kubectl scale deployment --all -n {{ item.item }} --replicas=0
+      loop: "{{ deployments.results }}"
+      when: item.stdout | length > 0
+      changed_when: true
+      failed_when: false
+      tags:
+        - scale
+
+    # Drain worker nodes
+    - name: Drain worker nodes
+      ansible.builtin.command: >
+        kubectl drain {{ item }}
+        --ignore-daemonsets
+        --delete-emptydir-data
+        --timeout={{ drain_timeout }}s
+        --grace-period={{ drain_grace_period }}
+        {{ '--force' if force_drain else '' }}
+      loop: "{{ groups['workers'] | default([]) }}"
+      register: drain_result
+      changed_when: "'evicting' in drain_result.stdout or 'evicted' in drain_result.stdout"
+      failed_when: false
+      tags:
+        - drain
+
+    - name: Display drain results
+      ansible.builtin.debug:
+        msg: "Drain {{ item.item }}: {{ 'SUCCESS' if item.rc == 0 else 'FAILED - ' + item.stderr }}"
+      loop: "{{ drain_result.results }}"
+      when: drain_result.results is defined
+      tags:
+        - drain
+
+    # Wait for pods to terminate
+    - name: Wait for pods to terminate on workers
+      ansible.builtin.command: >
+        kubectl get pods --field-selector=spec.nodeName={{ item }} --all-namespaces -o name
+      loop: "{{ groups['workers'] | default([]) }}"
+      register: remaining_pods
+      until: remaining_pods.stdout | length == 0
+      retries: 30
+      delay: 10
+      failed_when: false
+      changed_when: false
+      tags:
+        - drain
+
+    - name: Save final cluster state
+      ansible.builtin.shell: |
+        kubectl get pods --all-namespaces -o wide > "{{ state_dir }}/final-pods.txt"
+        kubectl get nodes -o wide > "{{ state_dir }}/final-nodes.txt"
+      changed_when: true
+      tags:
+        - state
+
+  post_tasks:
+    - name: Display drain completion
+      ansible.builtin.debug:
+        msg: |
+          Cluster drain complete
+          
+          Worker nodes cordoned and drained
+          State preserved to: {{ state_dir }}
+          
+          Proceeding to shutdown nodes...
+
+
+# Shutdown worker nodes
+- name: Shutdown Worker Nodes
+  hosts: workers
+  become: true
+  gather_facts: false
+  serial: 1
+  
+  vars:
+    shutdown_delay: 10
+    
+  tasks:
+    - name: Display shutdown notice
+      ansible.builtin.debug:
+        msg: "Shutting down worker node: {{ inventory_hostname }}"
+      tags:
+        - shutdown
+
+    - name: Stop kubelet
+      ansible.builtin.systemd:
+        name: kubelet
+        state: stopped
+      failed_when: false
+      tags:
+        - shutdown
+
+    - name: Stop container runtime
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - containerd
+        - docker
+        - crio
+      failed_when: false
+      tags:
+        - shutdown
+
+    - name: Sync filesystems
+      ansible.builtin.command: sync
+      changed_when: true
+      tags:
+        - shutdown
+
+    - name: Shutdown node
+      ansible.builtin.command: shutdown -h +1 "VMStation cluster spin-down"
+      async: 0
+      poll: 0
+      failed_when: false
+      tags:
+        - shutdown
+
+    - name: Wait before next node
+      ansible.builtin.pause:
+        seconds: "{{ shutdown_delay }}"
+      tags:
+        - shutdown
+
+
+# Shutdown storage nodes
+- name: Shutdown Storage Nodes
+  hosts: storage
+  become: true
+  gather_facts: false
+  serial: 1
+  
+  tasks:
+    - name: Display shutdown notice
+      ansible.builtin.debug:
+        msg: "Shutting down storage node: {{ inventory_hostname }}"
+      tags:
+        - shutdown
+
+    - name: Stop storage services
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - rook-ceph-agent
+        - ceph-osd.target
+      failed_when: false
+      tags:
+        - shutdown
+
+    - name: Sync filesystems
+      ansible.builtin.command: sync
+      changed_when: true
+      tags:
+        - shutdown
+
+    - name: Shutdown node
+      ansible.builtin.command: shutdown -h +1 "VMStation cluster spin-down"
+      async: 0
+      poll: 0
+      failed_when: false
+      tags:
+        - shutdown
+
+
+# Shutdown master nodes (optional)
+- name: Shutdown Master Nodes
+  hosts: masters
+  become: true
+  gather_facts: false
+  serial: 1
+  
+  vars:
+    shutdown_masters: "{{ shutdown_control_plane | default(true) }}"
+    
+  tasks:
+    - name: Display master shutdown notice
+      ansible.builtin.debug:
+        msg: |
+          Master node: {{ inventory_hostname }}
+          Shutdown enabled: {{ shutdown_masters }}
+      tags:
+        - shutdown
+
+    - name: Stop control plane components
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - kube-apiserver
+        - kube-controller-manager
+        - kube-scheduler
+        - etcd
+      failed_when: false
+      when: shutdown_masters
+      tags:
+        - shutdown
+
+    - name: Stop kubelet on master
+      ansible.builtin.systemd:
+        name: kubelet
+        state: stopped
+      when: shutdown_masters
+      failed_when: false
+      tags:
+        - shutdown
+
+    - name: Sync filesystems
+      ansible.builtin.command: sync
+      changed_when: true
+      when: shutdown_masters
+      tags:
+        - shutdown
+
+    - name: Shutdown master node
+      ansible.builtin.command: shutdown -h +1 "VMStation cluster spin-down"
+      async: 0
+      poll: 0
+      failed_when: false
+      when: shutdown_masters
+      tags:
+        - shutdown
+
+
+# Final summary
+- name: Cluster Shutdown Summary
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  
+  tasks:
+    - name: Display shutdown summary
+      ansible.builtin.debug:
+        msg: |
+          ==========================================
+          VMStation Cluster Shutdown Complete
+          ==========================================
+          
+          Shutdown sequence completed:
+            1. Worker nodes cordoned and drained
+            2. Deployments scaled to zero
+            3. Worker nodes shutdown
+            4. Storage nodes shutdown
+            5. Master nodes shutdown (if enabled)
+          
+          To restart the cluster:
+            1. Power on master nodes first
+            2. Wait for control plane to be healthy
+            3. Power on storage nodes
+            4. Power on worker nodes
+            5. Uncordon worker nodes:
+               kubectl uncordon <node-name>
+            6. Restore deployments if needed
+          
+          Or use the wake-all script:
+            /tmp/vmstation-wake-all.sh

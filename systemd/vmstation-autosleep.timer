@@ -1,0 +1,35 @@
+# VMStation Auto-Sleep Check Timer
+# This timer triggers periodic activity checks for auto-sleep.
+#
+# Installation:
+#   sudo cp vmstation-autosleep.timer /etc/systemd/system/
+#   sudo cp vmstation-autosleep-check.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable vmstation-autosleep.timer
+#   sudo systemctl start vmstation-autosleep.timer
+
+[Unit]
+Description=VMStation Auto-Sleep Check Timer
+Documentation=https://github.com/jjbly-vmstation/cluster-setup
+Requires=vmstation-autosleep-check.service
+
+[Timer]
+# Initial delay after boot
+OnBootSec=5min
+
+# Run every 5 minutes
+OnUnitActiveSec=5min
+
+# Add randomized delay to prevent synchronized checks across cluster
+# This helps avoid all nodes checking and potentially sleeping at the same time
+RandomizedDelaySec=30
+
+# Persist timer across reboots
+# If a run is missed (e.g., during sleep), catch up
+Persistent=true
+
+# Accuracy of the timer
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

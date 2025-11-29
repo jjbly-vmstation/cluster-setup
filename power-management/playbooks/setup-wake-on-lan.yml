@@ -1,0 +1,319 @@
+---
+# setup-wake-on-lan.yml - Configure Wake-on-LAN for cluster nodes
+# Part of VMStation Power Management
+#
+# This playbook configures Wake-on-LAN (WoL) functionality:
+# - Enable WoL on network interfaces
+# - Configure persistent WoL settings
+# - Register MAC addresses for cluster-wide wake
+# - Test WoL functionality
+#
+# Usage:
+#   ansible-playbook -i inventory/hosts.yml power-management/playbooks/setup-wake-on-lan.yml
+
+- name: Setup Wake-on-LAN
+  hosts: all
+  become: true
+  gather_facts: true
+  
+  vars:
+    # WoL configuration
+    wol_interface: "{{ ansible_default_ipv4.interface | default('eth0') }}"
+    wol_mode: "g"  # g = magic packet, u = unicast, m = multicast, b = broadcast
+    
+    # Directories
+    wol_config_dir: /etc/vmstation/wol
+    wol_scripts_dir: /opt/vmstation/wol
+    
+    # Registry location (on control node)
+    wol_registry_path: /etc/vmstation/wol-registry.conf
+
+  handlers:
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+  tasks:
+    - name: Display WoL configuration
+      ansible.builtin.debug:
+        msg: |
+          Configuring Wake-on-LAN for {{ inventory_hostname }}
+          Interface: {{ wol_interface }}
+          MAC Address: {{ ansible_facts[wol_interface]['macaddress'] | default('unknown') }}
+
+    # Install required packages
+    - name: Install ethtool (Debian/Ubuntu)
+      ansible.builtin.apt:
+        name:
+          - ethtool
+          - wakeonlan
+        state: present
+      when: ansible_os_family == "Debian"
+      tags:
+        - packages
+
+    - name: Install ethtool (RedHat/CentOS)
+      ansible.builtin.yum:
+        name:
+          - ethtool
+        state: present
+      when: ansible_os_family == "RedHat"
+      tags:
+        - packages
+
+    # Create directories
+    - name: Create WoL directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - "{{ wol_config_dir }}"
+        - "{{ wol_scripts_dir }}"
+      tags:
+        - directories
+
+    # Check current WoL status
+    - name: Get current WoL status
+      ansible.builtin.command: ethtool {{ wol_interface }}
+      register: ethtool_output
+      changed_when: false
+      failed_when: false
+      tags:
+        - check
+
+    - name: Parse WoL capabilities
+      ansible.builtin.set_fact:
+        wol_supported: "{{ 'Supports Wake-on' in ethtool_output.stdout }}"
+        wol_current: "{{ ethtool_output.stdout | regex_search('Wake-on: ([a-z]+)', '\\1') | first | default('d') }}"
+      tags:
+        - check
+
+    - name: Display WoL status
+      ansible.builtin.debug:
+        msg: |
+          WoL Supported: {{ wol_supported }}
+          Current WoL mode: {{ wol_current }}
+          Desired WoL mode: {{ wol_mode }}
+      tags:
+        - check
+
+    # Enable WoL
+    - name: Enable Wake-on-LAN
+      ansible.builtin.command: ethtool -s {{ wol_interface }} wol {{ wol_mode }}
+      when: wol_supported and wol_current != wol_mode
+      changed_when: true
+      tags:
+        - configure
+
+    # Make WoL persistent with systemd
+    - name: Create WoL enablement service
+      ansible.builtin.copy:
+        content: |
+          [Unit]
+          Description=Enable Wake-on-LAN for {{ wol_interface }}
+          After=network.target
+          
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/sbin/ethtool -s {{ wol_interface }} wol {{ wol_mode }}
+          RemainAfterExit=yes
+          
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/vmstation-wol-enable.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Reload systemd
+      tags:
+        - systemd
+
+    - name: Enable WoL service
+      ansible.builtin.systemd:
+        name: vmstation-wol-enable.service
+        state: started
+        enabled: true
+        daemon_reload: true
+      tags:
+        - systemd
+
+    # Store node WoL information
+    - name: Get MAC address
+      ansible.builtin.set_fact:
+        node_mac: "{{ ansible_facts[wol_interface]['macaddress'] }}"
+        node_ip: "{{ ansible_host }}"
+      tags:
+        - register
+
+    - name: Create node WoL configuration
+      ansible.builtin.copy:
+        content: |
+          # VMStation WoL Configuration
+          # Node: {{ inventory_hostname }}
+          # Generated: {{ ansible_date_time.iso8601 }}
+          
+          HOSTNAME={{ inventory_hostname }}
+          IP_ADDRESS={{ node_ip }}
+          MAC_ADDRESS={{ node_mac }}
+          INTERFACE={{ wol_interface }}
+          WOL_MODE={{ wol_mode }}
+          WOL_SUPPORTED={{ wol_supported }}
+        dest: "{{ wol_config_dir }}/node.conf"
+        owner: root
+        group: root
+        mode: "0644"
+      tags:
+        - register
+
+    # Create wake script for this node
+    - name: Create node wake script
+      ansible.builtin.copy:
+        content: |
+          #!/bin/bash
+          # Wake {{ inventory_hostname }}
+          # MAC: {{ node_mac }}
+          # IP: {{ node_ip }}
+          
+          set -euo pipefail
+          
+          MAC="{{ node_mac }}"
+          IP="{{ node_ip }}"
+          RETRIES="${1:-3}"
+          DELAY="${2:-10}"
+          
+          echo "Sending wake packet to {{ inventory_hostname }} (${MAC})..."
+          
+          for i in $(seq 1 $RETRIES); do
+              if command -v wakeonlan &>/dev/null; then
+                  wakeonlan "$MAC"
+              elif command -v etherwake &>/dev/null; then
+                  etherwake "$MAC"
+              elif command -v wol &>/dev/null; then
+                  wol "$MAC"
+              else
+                  echo "ERROR: No WoL tool found (wakeonlan, etherwake, or wol)"
+                  exit 1
+              fi
+              
+              echo "Wake packet sent (attempt $i/$RETRIES)"
+              
+              if [ "$i" -lt "$RETRIES" ]; then
+                  echo "Waiting ${DELAY}s before retry..."
+                  sleep "$DELAY"
+                  
+                  # Check if node is up
+                  if ping -c 1 -W 2 "$IP" &>/dev/null; then
+                      echo "{{ inventory_hostname }} is responding!"
+                      exit 0
+                  fi
+              fi
+          done
+          
+          echo "Wake packets sent. Verifying..."
+          sleep 30
+          
+          if ping -c 1 -W 5 "$IP" &>/dev/null; then
+              echo "SUCCESS: {{ inventory_hostname }} is awake and responding"
+              exit 0
+          else
+              echo "WARNING: {{ inventory_hostname }} not responding yet. May still be booting."
+              exit 1
+          fi
+        dest: "{{ wol_scripts_dir }}/wake-{{ inventory_hostname }}.sh"
+        owner: root
+        group: root
+        mode: "0755"
+      tags:
+        - scripts
+
+    # Verify WoL is enabled
+    - name: Verify WoL is enabled
+      ansible.builtin.command: ethtool {{ wol_interface }}
+      register: final_ethtool
+      changed_when: false
+      tags:
+        - verify
+
+    - name: Check WoL enabled successfully
+      ansible.builtin.assert:
+        that:
+          - "'Wake-on: ' + wol_mode in final_ethtool.stdout or not wol_supported"
+        fail_msg: "WoL not enabled correctly"
+        success_msg: "WoL enabled successfully"
+      tags:
+        - verify
+
+  post_tasks:
+    - name: Display WoL summary
+      ansible.builtin.debug:
+        msg: |
+          Wake-on-LAN configured for {{ inventory_hostname }}
+          
+          Interface: {{ wol_interface }}
+          MAC Address: {{ node_mac }}
+          WoL Mode: {{ wol_mode }}
+          
+          To wake this node from another machine:
+            wakeonlan {{ node_mac }}
+            
+          Or use the generated script:
+            {{ wol_scripts_dir }}/wake-{{ inventory_hostname }}.sh
+
+
+# Create cluster-wide WoL registry on control node
+- name: Create WoL Registry
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  
+  vars:
+    registry_file: /tmp/vmstation-wol-registry.conf
+    
+  tasks:
+    - name: Create cluster WoL registry
+      ansible.builtin.copy:
+        content: |
+          # VMStation Cluster WoL Registry
+          # Generated: {{ lookup('pipe', 'date -Iseconds') }}
+          #
+          # Format: hostname|ip|mac|interface
+          #
+          {% for host in groups['all'] %}
+          {{ host }}|{{ hostvars[host]['node_ip'] | default('') }}|{{ hostvars[host]['node_mac'] | default('') }}|{{ hostvars[host]['wol_interface'] | default('') }}
+          {% endfor %}
+        dest: "{{ registry_file }}"
+        mode: "0644"
+        
+    - name: Create cluster wake-all script
+      ansible.builtin.copy:
+        content: |
+          #!/bin/bash
+          # Wake all VMStation cluster nodes
+          # Generated: {{ lookup('pipe', 'date -Iseconds') }}
+          
+          set -euo pipefail
+          
+          echo "Waking all VMStation cluster nodes..."
+          
+          {% for host in groups['all'] %}
+          {% if hostvars[host]['node_mac'] is defined %}
+          echo "Waking {{ host }} ({{ hostvars[host]['node_mac'] }})..."
+          wakeonlan "{{ hostvars[host]['node_mac'] }}" || true
+          {% endif %}
+          {% endfor %}
+          
+          echo ""
+          echo "Wake packets sent to all nodes."
+          echo "Nodes may take 1-2 minutes to fully boot."
+        dest: /tmp/vmstation-wake-all.sh
+        mode: "0755"
+        
+    - name: Display registry information
+      ansible.builtin.debug:
+        msg: |
+          WoL Registry created:
+            {{ registry_file }}
+            /tmp/vmstation-wake-all.sh
