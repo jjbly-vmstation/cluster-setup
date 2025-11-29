@@ -102,13 +102,13 @@ get_node_info() {
     local hostname="$1"
     local mac=""
     local ip=""
-    
+
     # Try node-specific config first
     if [[ -f "$CONFIG_DIR/${hostname}.conf" ]]; then
-        mac=$(grep -oP 'MAC_ADDRESS=\K.*' "$CONFIG_DIR/${hostname}.conf" 2>/dev/null || echo "")
-        ip=$(grep -oP 'IP_ADDRESS=\K.*' "$CONFIG_DIR/${hostname}.conf" 2>/dev/null || echo "")
+        mac=$(awk -F= '/^MAC_ADDRESS=/ {print $2}' "$CONFIG_DIR/${hostname}.conf" 2>/dev/null || echo "")
+        ip=$(awk -F= '/^IP_ADDRESS=/ {print $2}' "$CONFIG_DIR/${hostname}.conf" 2>/dev/null || echo "")
     fi
-    
+
     # Try registry file
     if [[ -z "$mac" ]] && [[ -f "$WOL_REGISTRY" ]]; then
         local line
@@ -118,7 +118,7 @@ get_node_info() {
             mac=$(echo "$line" | cut -d'|' -f3)
         fi
     fi
-    
+
     # Output as "mac ip"
     echo "$mac $ip"
 }

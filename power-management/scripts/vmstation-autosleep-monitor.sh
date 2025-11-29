@@ -187,15 +187,28 @@ check_pods() {
 # Check CPU usage
 check_cpu() {
     local cpu_usage
-    
-    # Get CPU idle percentage and calculate usage
-    cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print 100 - $8}' | cut -d'.' -f1 2>/dev/null || echo "0")
-    
+
+    # Get CPU idle percentage using /proc/stat for more reliable cross-platform support
+    local idle_now busy_now idle_prev busy_prev
+    read -r _ idle_prev busy_prev < <(awk '/^cpu / {idle=$5; busy=$2+$3+$4+$6+$7+$8; print idle, busy}' /proc/stat)
+    sleep 1
+    read -r _ idle_now busy_now < <(awk '/^cpu / {idle=$5; busy=$2+$3+$4+$6+$7+$8; print idle, busy}' /proc/stat)
+
+    local idle_delta=$((idle_now - idle_prev))
+    local busy_delta=$((busy_now - busy_prev))
+    local total_delta=$((idle_delta + busy_delta))
+
+    if [[ $total_delta -gt 0 ]]; then
+        cpu_usage=$((busy_delta * 100 / total_delta))
+    else
+        cpu_usage=0
+    fi
+
     if [[ "$cpu_usage" -gt "$CPU_THRESHOLD_PERCENT" ]]; then
         log_info "CPU usage ${cpu_usage}% exceeds threshold ${CPU_THRESHOLD_PERCENT}%"
         return 0  # Activity detected
     fi
-    
+
     return 1  # No activity
 }
 

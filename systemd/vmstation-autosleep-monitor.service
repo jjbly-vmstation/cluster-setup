@@ -19,7 +19,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/opt/vmstation/autosleep/vmstation-autosleep-monitor.sh start
+ExecStart=/opt/vmstation/scripts/vmstation-autosleep-monitor.sh start
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=30

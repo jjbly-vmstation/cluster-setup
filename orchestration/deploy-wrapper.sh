@@ -167,13 +167,13 @@ phase_preflight() {
         return 1
     fi
     log_info "Inventory: $INVENTORY_FILE"
-    
+
     log_step "Validating inventory syntax..."
-    if ! python3 -c "import yaml; yaml.safe_load(open('$INVENTORY_FILE'))" 2>/dev/null; then
+    if ! python3 -c "import sys, yaml; yaml.safe_load(sys.stdin)" < "$INVENTORY_FILE" 2>/dev/null; then
         log_error "Invalid YAML in inventory file"
         return 1
     fi
-    
+
     log_success "Pre-flight validation passed"
 }
 
