@@ -25,6 +25,7 @@ cd cluster-setup
 ./orchestration/quick-deploy.sh autosleep # Auto-sleep config
 ```
 
+
 ## Directory Structure
 
 ```
@@ -32,42 +33,21 @@ cluster-setup/
 ├── README.md                      # This file
 ├── IMPROVEMENTS_AND_STANDARDS.md  # Best practices and standards
 ├── bootstrap/                     # Bootstrap and preparation scripts
-│   ├── install-dependencies.sh    # Install required tools
-│   ├── setup-ssh-keys.sh          # Configure SSH access
-│   ├── prepare-nodes.sh           # Prepare cluster nodes
-│   └── verify-prerequisites.sh    # Validate setup
 ├── ansible/                       # Ansible configuration
-│   ├── ansible.cfg                # Ansible settings
-│   ├── inventory/
-│   │   └── hosts.yml              # Cluster inventory
-│   └── playbooks/
-│       ├── initial-setup.yml      # Initial cluster setup
-│       ├── setup-autosleep.yml    # Auto-sleep configuration
-│       ├── configure-power-management.yml
-│       └── deploy-event-wake.yml  # Wake handler deployment
 ├── power-management/              # Power management module
-│   ├── playbooks/
-│   │   ├── setup-wake-on-lan.yml
-│   │   ├── configure-autosleep.yml
-│   │   └── spin-down-cluster.yml
-│   ├── scripts/
-│   │   ├── vmstation-autosleep-monitor.sh
-│   │   ├── vmstation-sleep.sh
-│   │   └── vmstation-wake.sh
-│   └── templates/
 ├── orchestration/                 # Deployment orchestration
-│   ├── deploy-wrapper.sh          # Full deployment script
-│   └── quick-deploy.sh            # Quick deployment helper
 ├── systemd/                       # Systemd unit files
-│   ├── vmstation-autosleep-monitor.service
-│   ├── vmstation-autosleep.timer
-│   └── vmstation-wake-event.service
-└── docs/                          # Documentation
-    ├── BOOTSTRAP_GUIDE.md
-    ├── POWER_MANAGEMENT.md
-    ├── AUTOSLEEP_CONFIGURATION.md
-    └── WAKE_ON_LAN_SETUP.md
 ```
+
+## Documentation
+
+All detailed setup and power management documentation has been centralized in the [cluster-docs/components/](../cluster-docs/components/) directory. Please refer to that location for:
+- Bootstrap guide
+- Power management
+- Autosleep configuration
+- Wake-on-LAN setup
+
+This repository only contains the README and improvements/standards documentation.
 
 ## Prerequisites
 
