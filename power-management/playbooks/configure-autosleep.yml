@@ -9,7 +9,7 @@
 # - Enable whitelist/blacklist for pods
 #
 # Usage:
-#   ansible-playbook -i inventory/hosts.yml power-management/playbooks/configure-autosleep.yml
+#   ansible-playbook -i /srv/vmstation-org/cluster-setup/ansible/inventory/hosts.yml power-management/playbooks/configure-autosleep.yml
 
 - name: Configure Auto-Sleep
   hosts: sleepable

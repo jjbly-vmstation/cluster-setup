@@ -16,7 +16,7 @@ SSH_KEY_PATH="${SSH_KEY_PATH:-$HOME/.ssh/vmstation_cluster}"
 SSH_KEY_TYPE="${SSH_KEY_TYPE:-ed25519}"
 SSH_KEY_COMMENT="${SSH_KEY_COMMENT:-vmstation-cluster-$(date +%Y%m%d)}"
 SSH_CONFIG_FILE="${SSH_CONFIG_FILE:-$HOME/.ssh/config}"
-INVENTORY_FILE="${INVENTORY_FILE:-$(dirname "$SCRIPT_DIR")/ansible/inventory/hosts.yml}"
+INVENTORY_FILE="${INVENTORY_FILE:-$(dirname "$SCRIPT_DIR"/srv/vmstation-org/cluster-setup/ansible/inventory/hosts.yml}"
 
 # Colors for output
 RED='\033[0;31m'

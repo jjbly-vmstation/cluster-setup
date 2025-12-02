@@ -16,7 +16,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
 # Configuration
-INVENTORY_FILE="${INVENTORY_FILE:-$REPO_ROOT/ansible/inventory/hosts.yml}"
+INVENTORY_FILE="/srv/vmstation-org/cluster-setup/ansible/inventory/hosts.yml}"
 ANSIBLE_CONFIG="$REPO_ROOT/ansible/ansible.cfg"
 
 # Colors

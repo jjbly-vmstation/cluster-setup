@@ -152,7 +152,7 @@ This installs:
 
 ### 2. Configure Inventory
 
-Edit `ansible/inventory/hosts.yml`:
+Edit /srv/vmstation-org/cluster-setup/ansible/inventory/hosts.yml`:
 
 ```yaml
 all:
@@ -283,7 +283,7 @@ curl -X POST http://master:9876/wake/worker-01 \
 Gracefully spin down the cluster:
 
 ```bash
-ansible-playbook -i ansible/inventory/hosts.yml \
+ansible-playbook -i /srv/vmstation-org/cluster-setup/ansible/inventory/hosts.yml \
   power-management/playbooks/spin-down-cluster.yml
 ```
 
@@ -343,13 +343,13 @@ The wake event handler runs on port 9876:
 ansible-playbook playbooks/initial-setup.yml --syntax-check
 
 # Dry run
-ansible-playbook -i inventory/hosts.yml playbooks/initial-setup.yml --check
+ansible-playbook -i /srv/vmstation-org/cluster-setup/ansible/inventory/hosts.yml playbooks/initial-setup.yml --check
 
 # Execute
-ansible-playbook -i inventory/hosts.yml playbooks/initial-setup.yml
+ansible-playbook -i /srv/vmstation-org/cluster-setup/ansible/inventory/hosts.yml playbooks/initial-setup.yml
 
 # With tags
-ansible-playbook -i inventory/hosts.yml playbooks/initial-setup.yml --tags=packages
+ansible-playbook -i /srv/vmstation-org/cluster-setup/ansible/inventory/hosts.yml playbooks/initial-setup.yml --tags=packages
 ```
 
 ## Troubleshooting
@@ -361,7 +361,7 @@ ansible-playbook -i inventory/hosts.yml playbooks/initial-setup.yml --tags=packa
 ssh -i ~/.ssh/vmstation_cluster root@192.168.1.10
 
 # Check Ansible connectivity
-ansible -i ansible/inventory/hosts.yml all -m ping
+ansible -i /srv/vmstation-org/cluster-setup/ansible/inventory/hosts.yml all -m ping
 ```
 
 ### Auto-Sleep Not Working

@@ -273,7 +273,7 @@ check_configuration() {
     else
         # Try to find inventory
         local found_inventory=""
-        for inv in "$REPO_ROOT/ansible/inventory/hosts.yml" "$WORKSPACE_DIR/cluster-infra/inventory/hosts.yml"; do
+        for inv in "/srv/vmstation-org/cluster-setup/ansible/inventory/hosts.yml" "/srv/vmstation-org/cluster-setup/ansible/inventory/hosts.yml"; do
             if [[ -f "$inv" ]]; then
                 found_inventory="$inv"
                 break
@@ -500,7 +500,7 @@ main() {
     
     # Detect inventory
     if [[ -z "$ANSIBLE_INVENTORY" ]]; then
-        for inv in "$REPO_ROOT/ansible/inventory/hosts.yml" "$WORKSPACE_DIR/cluster-infra/inventory/hosts.yml"; do
+        for inv in "/srv/vmstation-org/cluster-setup/ansible/inventory/hosts.yml" "/srv/vmstation-org/cluster-setup/ansible/inventory/hosts.yml"; do
             if [[ -f "$inv" ]]; then
                 ANSIBLE_INVENTORY="$inv"
                 break

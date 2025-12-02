@@ -10,9 +10,9 @@
 # - Basic security hardening
 #
 # Usage:
-#   ansible-playbook -i inventory/hosts.yml playbooks/initial-setup.yml
-#   ansible-playbook -i inventory/hosts.yml playbooks/initial-setup.yml --check  # Dry run
-#   ansible-playbook -i inventory/hosts.yml playbooks/initial-setup.yml --tags=packages
+#   ansible-playbook -i /srv/vmstation-org/cluster-setup/ansible/inventory/hosts.yml playbooks/initial-setup.yml
+#   ansible-playbook -i /srv/vmstation-org/cluster-setup/ansible/inventory/hosts.yml playbooks/initial-setup.yml --check  # Dry run
+#   ansible-playbook -i /srv/vmstation-org/cluster-setup/ansible/inventory/hosts.yml playbooks/initial-setup.yml --tags=packages
 
 - name: Initial Cluster Setup
   hosts: all

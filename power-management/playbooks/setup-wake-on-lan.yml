@@ -9,7 +9,7 @@
 # - Test WoL functionality
 #
 # Usage:
-#   ansible-playbook -i inventory/hosts.yml power-management/playbooks/setup-wake-on-lan.yml
+#   ansible-playbook -i /srv/vmstation-org/cluster-setup/ansible/inventory/hosts.yml power-management/playbooks/setup-wake-on-lan.yml
 
 - name: Setup Wake-on-LAN
   hosts: all

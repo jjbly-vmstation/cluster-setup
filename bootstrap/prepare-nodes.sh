@@ -13,7 +13,7 @@ set -euo pipefail
 
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INVENTORY_FILE="${INVENTORY_FILE:-$(dirname "$SCRIPT_DIR")/ansible/inventory/hosts.yml}"
+INVENTORY_FILE="${INVENTORY_FILE:-$(dirname "$SCRIPT_DIR"/srv/vmstation-org/cluster-setup/ansible/inventory/hosts.yml}"
 SSH_KEY_PATH="${SSH_KEY_PATH:-$HOME/.ssh/vmstation_cluster}"
 SSH_USER="${SSH_USER:-root}"
 DRY_RUN="${DRY_RUN:-false}"

@@ -9,7 +9,7 @@
 # - Wake verification and logging
 #
 # Usage:
-#   ansible-playbook -i inventory/hosts.yml playbooks/deploy-event-wake.yml
+#   ansible-playbook -i /srv/vmstation-org/cluster-setup/ansible/inventory/hosts.yml playbooks/deploy-event-wake.yml
 
 - name: Deploy Wake Event Handler
   hosts: masters

@@ -268,7 +268,7 @@ setup_repositories() {
 # Detect Ansible inventory
 detect_inventory() {
     # Try cluster-infra first
-    local infra_inventory="$WORKSPACE_DIR/cluster-infra/inventory/hosts.yml"
+    local infra_inventory="/srv/vmstation-org/cluster-setup/ansible/inventory/hosts.yml"
     if [[ -f "$infra_inventory" ]]; then
         ANSIBLE_INVENTORY="$infra_inventory"
         log_info "Using inventory from cluster-infra: $ANSIBLE_INVENTORY"
@@ -276,7 +276,7 @@ detect_inventory() {
     fi
     
     # Try local repository
-    local local_inventory="$REPO_ROOT/ansible/inventory/hosts.yml"
+    local local_inventory="/srv/vmstation-org/cluster-setup/ansible/inventory/hosts.yml"
     if [[ -f "$local_inventory" ]]; then
         ANSIBLE_INVENTORY="$local_inventory"
         log_info "Using local inventory: $ANSIBLE_INVENTORY"

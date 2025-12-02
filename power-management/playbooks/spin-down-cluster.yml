@@ -10,8 +10,8 @@
 # - Shutdown nodes in proper order
 #
 # Usage:
-#   ansible-playbook -i inventory/hosts.yml power-management/playbooks/spin-down-cluster.yml
-#   ansible-playbook -i inventory/hosts.yml power-management/playbooks/spin-down-cluster.yml --check  # Dry run
+#   ansible-playbook -i /srv/vmstation-org/cluster-setup/ansible/inventory/hosts.yml power-management/playbooks/spin-down-cluster.yml
+#   ansible-playbook -i /srv/vmstation-org/cluster-setup/ansible/inventory/hosts.yml power-management/playbooks/spin-down-cluster.yml --check  # Dry run
 
 - name: Spin Down Cluster - Cordon and Drain
   hosts: masters[0]

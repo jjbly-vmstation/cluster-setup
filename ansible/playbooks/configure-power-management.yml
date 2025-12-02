@@ -9,7 +9,7 @@
 # - Power consumption optimization
 #
 # Usage:
-#   ansible-playbook -i inventory/hosts.yml playbooks/configure-power-management.yml
+#   ansible-playbook -i /srv/vmstation-org/cluster-setup/ansible/inventory/hosts.yml playbooks/configure-power-management.yml
 
 - name: Configure Power Management
   hosts: all

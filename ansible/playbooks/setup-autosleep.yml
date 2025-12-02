@@ -9,8 +9,8 @@
 # - Configures pod activity detection
 #
 # Usage:
-#   ansible-playbook -i inventory/hosts.yml playbooks/setup-autosleep.yml
-#   ansible-playbook -i inventory/hosts.yml playbooks/setup-autosleep.yml -e autosleep_timeout_minutes=60
+#   ansible-playbook -i /srv/vmstation-org/cluster-setup/ansible/inventory/hosts.yml playbooks/setup-autosleep.yml
+#   ansible-playbook -i /srv/vmstation-org/cluster-setup/ansible/inventory/hosts.yml playbooks/setup-autosleep.yml -e autosleep_timeout_minutes=60
 
 - name: Setup Auto-Sleep Monitoring
   hosts: sleepable
