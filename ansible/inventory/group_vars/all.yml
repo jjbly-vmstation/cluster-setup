@@ -1,0 +1,3 @@
+---
+# Global group variables for VMStation cluster
+kerberos_server: masternode
