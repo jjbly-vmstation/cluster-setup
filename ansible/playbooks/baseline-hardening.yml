@@ -1,0 +1,772 @@
+---
+# baseline-hardening.yml - Comprehensive Baseline Security Hardening
+# Part of VMStation Cluster Setup
+#
+# This playbook establishes baseline security, system requirements, and directory
+# structure for the VMStation Kubernetes environment. It must be run before
+# deploying Kubernetes or any cluster services.
+#
+# Features:
+# - SSH hardening with key-based authentication
+# - System users and groups for monitoring services
+# - Time synchronization with chrony
+# - Kubernetes system requirements (sysctl, kernel modules)
+# - Base package installation
+# - Directory structure creation
+# - Firewall configuration
+# - File permissions hardening
+# - Disable unnecessary services
+#
+# Usage:
+#   ansible-playbook -i ../inventory/hosts.yml baseline-hardening.yml
+#   ansible-playbook -i ../inventory/hosts.yml baseline-hardening.yml --check  # Dry run
+#   ansible-playbook -i ../inventory/hosts.yml baseline-hardening.yml --tags=ssh,firewall
+#
+# Tags:
+#   ssh - SSH configuration and hardening
+#   users - System users and groups
+#   time - Time synchronization
+#   sysctl - Kernel parameters
+#   kernel - Kernel modules
+#   packages - Package installation
+#   directories - Directory structure
+#   firewall - Firewall configuration
+#   permissions - File permissions
+#   services - Service management
+
+- name: Baseline Security Hardening and System Preparation
+  hosts: all
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    # Base packages for all distributions
+    base_packages_common:
+      - curl
+      - git
+      - python3
+      - python3-pip
+      - sudo
+      - rsync
+      - wget
+      - vim
+      - htop
+      - net-tools
+    
+    # Debian/Ubuntu specific packages
+    base_packages_debian:
+      - ufw
+      - iptables
+      - dnsutils
+      - software-properties-common
+      - apt-transport-https
+      - ca-certificates
+      - gnupg
+      - lsb-release
+    
+    # RHEL/Rocky specific packages
+    base_packages_redhat:
+      - firewalld
+      - iptables
+      - bind-utils
+      - policycoreutils-python-utils
+      - yum-utils
+      - device-mapper-persistent-data
+      - lvm2
+    
+    # NTP servers for time synchronization
+    ntp_servers:
+      - 0.pool.ntp.org
+      - 1.pool.ntp.org
+      - 2.pool.ntp.org
+      - 3.pool.ntp.org
+    
+    # Timezone (can be overridden)
+    timezone: UTC
+    
+    # Kubernetes sysctl parameters
+    k8s_sysctl_settings:
+      net.ipv4.ip_forward: 1
+      net.bridge.bridge-nf-call-iptables: 1
+      net.bridge.bridge-nf-call-ip6tables: 1
+      net.ipv4.conf.all.forwarding: 1
+      fs.inotify.max_user_watches: 524288
+      fs.inotify.max_user_instances: 512
+      fs.file-max: 2097152
+      vm.max_map_count: 262144
+      kernel.pid_max: 4194304
+      net.ipv4.tcp_keepalive_time: 600
+      net.ipv4.tcp_keepalive_intvl: 60
+      net.ipv4.tcp_keepalive_probes: 3
+      net.core.somaxconn: 32768
+      net.ipv4.ip_local_port_range: "1024 65535"
+    
+    # Required kernel modules
+    kernel_modules:
+      - br_netfilter
+      - overlay
+      - ip_vs
+      - ip_vs_rr
+      - ip_vs_wrr
+      - ip_vs_sh
+      - nf_conntrack
+    
+    # System users for monitoring services
+    system_users:
+      - name: prometheus
+        uid: 65534
+        home: /var/lib/prometheus
+        shell: /usr/sbin/nologin
+      - name: grafana
+        uid: 472
+        home: /var/lib/grafana
+        shell: /usr/sbin/nologin
+      - name: loki
+        uid: 10001
+        home: /var/lib/loki
+        shell: /usr/sbin/nologin
+    
+    # Monitoring data directories
+    monitoring_directories:
+      - path: /data/monitoring/prometheus
+        owner: 65534
+        group: 65534
+        mode: "0755"
+      - path: /data/monitoring/grafana
+        owner: 472
+        group: 472
+        mode: "0755"
+      - path: /data/monitoring/loki
+        owner: 10001
+        group: 10001
+        mode: "0755"
+      - path: /data/monitoring/alertmanager
+        owner: 65534
+        group: 65534
+        mode: "0755"
+    
+    # Application directories
+    application_directories:
+      - path: /opt/vmstation-org
+        owner: root
+        group: root
+        mode: "0755"
+      - path: /data/applications
+        owner: root
+        group: root
+        mode: "0755"
+    
+    # Firewall ports to open
+    firewall_ports:
+      - port: 22
+        protocol: tcp
+        description: SSH
+      - port: 6443
+        protocol: tcp
+        description: Kubernetes API
+      - port: 2379
+        protocol: tcp
+        description: etcd client
+      - port: 2380
+        protocol: tcp
+        description: etcd peer
+      - port: 10250
+        protocol: tcp
+        description: Kubelet API
+      - port: 10251
+        protocol: tcp
+        description: kube-scheduler
+      - port: 10252
+        protocol: tcp
+        description: kube-controller-manager
+      - port: 9090
+        protocol: tcp
+        description: Prometheus
+      - port: 3000
+        protocol: tcp
+        description: Grafana
+      - port: 3100
+        protocol: tcp
+        description: Loki
+      - port: 9093
+        protocol: tcp
+        description: Alertmanager
+      - port: 80
+        protocol: tcp
+        description: HTTP
+      - port: 443
+        protocol: tcp
+        description: HTTPS
+      - port: 9100
+        protocol: tcp
+        description: Node Exporter
+      - port: 9798
+        protocol: tcp
+        description: IPMI Exporter
+    
+    # Services to disable (if present)
+    services_to_disable:
+      - cups
+      - avahi-daemon
+      - bluetooth
+    
+    # SSH hardening settings
+    ssh_ciphers: "chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr"
+    ssh_macs: "hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256"
+    ssh_kex_algorithms: "curve25519-sha256,curve25519-sha256@libssh.org,ecdh-sha2-nistp521,ecdh-sha2-nistp384,ecdh-sha2-nistp256,diffie-hellman-group-exchange-sha256"
+  
+  handlers:
+    - name: Restart sshd
+      ansible.builtin.systemd:
+        name: sshd
+        state: restarted
+      listen: restart_sshd
+    
+    - name: Reload sshd
+      ansible.builtin.systemd:
+        name: sshd
+        state: reloaded
+      listen: reload_sshd
+    
+    - name: Restart chronyd
+      ansible.builtin.systemd:
+        name: chronyd
+        state: restarted
+        enabled: yes
+      when: ansible_os_family == "RedHat"
+      listen: restart_chrony
+    
+    - name: Restart chrony
+      ansible.builtin.systemd:
+        name: chrony
+        state: restarted
+        enabled: yes
+      when: ansible_os_family == "Debian"
+      listen: restart_chrony
+    
+    - name: Restart ufw
+      ansible.builtin.systemd:
+        name: ufw
+        state: restarted
+      when: ansible_os_family == "Debian"
+      listen: restart_firewall
+    
+    - name: Restart firewalld
+      ansible.builtin.systemd:
+        name: firewalld
+        state: restarted
+      when: ansible_os_family == "RedHat"
+      listen: restart_firewall
+    
+    - name: Apply sysctl
+      ansible.builtin.command: sysctl --system
+      changed_when: true
+      listen: reload_sysctl
+  
+  pre_tasks:
+    - name: Display execution information
+      ansible.builtin.debug:
+        msg: "Hardening node: {{ inventory_hostname }} ({{ ansible_host }}) - {{ ansible_distribution }} {{ ansible_distribution_version }}"
+    
+    - name: Validate connectivity
+      ansible.builtin.ping:
+  
+  tasks:
+    # ======================================================================
+    # PACKAGE INSTALLATION
+    # ======================================================================
+    
+    - name: Update package cache (Debian/Ubuntu)
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
+      tags:
+        - packages
+    
+    - name: Install base packages (Debian/Ubuntu)
+      ansible.builtin.apt:
+        name: "{{ base_packages_common + base_packages_debian }}"
+        state: present
+      when: ansible_os_family == "Debian"
+      tags:
+        - packages
+    
+    - name: Install base packages (RHEL/Rocky)
+      ansible.builtin.yum:
+        name: "{{ base_packages_common + base_packages_redhat }}"
+        state: present
+      when: ansible_os_family == "RedHat"
+      tags:
+        - packages
+    
+    # ======================================================================
+    # SSH HARDENING
+    # ======================================================================
+    
+    - name: Ensure SSH service is installed
+      ansible.builtin.package:
+        name: openssh-server
+        state: present
+      tags:
+        - ssh
+    
+    - name: Ensure SSH service is enabled and running
+      ansible.builtin.systemd:
+        name: sshd
+        state: started
+        enabled: yes
+      tags:
+        - ssh
+    
+    - name: Backup original SSH config
+      ansible.builtin.copy:
+        src: /etc/ssh/sshd_config
+        dest: /etc/ssh/sshd_config.backup
+        remote_src: yes
+        force: no
+      tags:
+        - ssh
+    
+    - name: Harden SSH configuration - Disable root login
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^#?PermitRootLogin"
+        line: "PermitRootLogin no"
+        state: present
+      notify: reload_sshd
+      tags:
+        - ssh
+    
+    - name: Harden SSH configuration - Disable password authentication
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^#?PasswordAuthentication"
+        line: "PasswordAuthentication no"
+        state: present
+      notify: reload_sshd
+      tags:
+        - ssh
+    
+    - name: Harden SSH configuration - Set strong ciphers
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^#?Ciphers"
+        line: "Ciphers {{ ssh_ciphers }}"
+        state: present
+      notify: reload_sshd
+      tags:
+        - ssh
+    
+    - name: Harden SSH configuration - Set strong MACs
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^#?MACs"
+        line: "MACs {{ ssh_macs }}"
+        state: present
+      notify: reload_sshd
+      tags:
+        - ssh
+    
+    - name: Harden SSH configuration - Set strong key exchange algorithms
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^#?KexAlgorithms"
+        line: "KexAlgorithms {{ ssh_kex_algorithms }}"
+        state: present
+      notify: reload_sshd
+      tags:
+        - ssh
+    
+    - name: Harden SSH configuration - Set ClientAliveInterval
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^#?ClientAliveInterval"
+        line: "ClientAliveInterval 300"
+        state: present
+      notify: reload_sshd
+      tags:
+        - ssh
+    
+    - name: Harden SSH configuration - Set ClientAliveCountMax
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^#?ClientAliveCountMax"
+        line: "ClientAliveCountMax 2"
+        state: present
+      notify: reload_sshd
+      tags:
+        - ssh
+    
+    - name: Harden SSH configuration - Disable X11 forwarding
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^#?X11Forwarding"
+        line: "X11Forwarding no"
+        state: present
+      notify: reload_sshd
+      tags:
+        - ssh
+    
+    - name: Harden SSH configuration - Disable TCP forwarding
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^#?AllowTcpForwarding"
+        line: "AllowTcpForwarding no"
+        state: present
+      notify: reload_sshd
+      tags:
+        - ssh
+    
+    - name: Harden SSH configuration - Disable Agent forwarding
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^#?AllowAgentForwarding"
+        line: "AllowAgentForwarding no"
+        state: present
+      notify: reload_sshd
+      tags:
+        - ssh
+    
+    - name: Harden SSH configuration - Set MaxAuthTries
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^#?MaxAuthTries"
+        line: "MaxAuthTries 3"
+        state: present
+      notify: reload_sshd
+      tags:
+        - ssh
+    
+    - name: Harden SSH configuration - Set LoginGraceTime
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^#?LoginGraceTime"
+        line: "LoginGraceTime 60"
+        state: present
+      notify: reload_sshd
+      tags:
+        - ssh
+    
+    - name: Set secure permissions on SSH config
+      ansible.builtin.file:
+        path: /etc/ssh/sshd_config
+        owner: root
+        group: root
+        mode: "0600"
+      tags:
+        - ssh
+        - permissions
+    
+    # ======================================================================
+    # SYSTEM USERS AND GROUPS
+    # ======================================================================
+    
+    - name: Create system groups for monitoring services
+      ansible.builtin.group:
+        name: "{{ item.name }}"
+        gid: "{{ item.uid }}"
+        system: yes
+        state: present
+      loop: "{{ system_users }}"
+      tags:
+        - users
+    
+    - name: Create system users for monitoring services
+      ansible.builtin.user:
+        name: "{{ item.name }}"
+        uid: "{{ item.uid }}"
+        group: "{{ item.name }}"
+        home: "{{ item.home }}"
+        shell: "{{ item.shell }}"
+        system: yes
+        create_home: yes
+        state: present
+      loop: "{{ system_users }}"
+      tags:
+        - users
+    
+    # ======================================================================
+    # TIME SYNCHRONIZATION
+    # ======================================================================
+    
+    - name: Install chrony (Debian/Ubuntu)
+      ansible.builtin.apt:
+        name: chrony
+        state: present
+      when: ansible_os_family == "Debian"
+      tags:
+        - time
+    
+    - name: Install chrony (RHEL/Rocky)
+      ansible.builtin.yum:
+        name: chrony
+        state: present
+      when: ansible_os_family == "RedHat"
+      tags:
+        - time
+    
+    - name: Configure chrony NTP servers (Debian/Ubuntu)
+      ansible.builtin.blockinfile:
+        path: /etc/chrony/chrony.conf
+        block: |
+          # VMStation NTP Configuration
+          {% for server in ntp_servers %}
+          pool {{ server }} iburst
+          {% endfor %}
+          
+          # Make steps adjustments if clock is off by more than 1 second
+          makestep 1.0 3
+          
+          # Enable kernel synchronization
+          rtcsync
+        marker: "# {mark} VMSTATION MANAGED BLOCK"
+        backup: yes
+      when: ansible_os_family == "Debian"
+      notify: restart_chrony
+      tags:
+        - time
+    
+    - name: Configure chrony NTP servers (RHEL/Rocky)
+      ansible.builtin.blockinfile:
+        path: /etc/chrony.conf
+        block: |
+          # VMStation NTP Configuration
+          {% for server in ntp_servers %}
+          pool {{ server }} iburst
+          {% endfor %}
+          
+          # Make steps adjustments if clock is off by more than 1 second
+          makestep 1.0 3
+          
+          # Enable kernel synchronization
+          rtcsync
+        marker: "# {mark} VMSTATION MANAGED BLOCK"
+        backup: yes
+      when: ansible_os_family == "RedHat"
+      notify: restart_chrony
+      tags:
+        - time
+    
+    - name: Ensure chrony is enabled and running (Debian/Ubuntu)
+      ansible.builtin.systemd:
+        name: chrony
+        state: started
+        enabled: yes
+      when: ansible_os_family == "Debian"
+      tags:
+        - time
+    
+    - name: Ensure chronyd is enabled and running (RHEL/Rocky)
+      ansible.builtin.systemd:
+        name: chronyd
+        state: started
+        enabled: yes
+      when: ansible_os_family == "RedHat"
+      tags:
+        - time
+    
+    - name: Set timezone
+      community.general.timezone:
+        name: "{{ timezone }}"
+      tags:
+        - time
+    
+    # ======================================================================
+    # KUBERNETES SYSTEM REQUIREMENTS
+    # ======================================================================
+    
+    - name: Load required kernel modules
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+      loop: "{{ kernel_modules }}"
+      tags:
+        - kernel
+    
+    - name: Ensure kernel modules load on boot
+      ansible.builtin.lineinfile:
+        path: /etc/modules-load.d/kubernetes.conf
+        line: "{{ item }}"
+        create: yes
+        mode: "0644"
+      loop: "{{ kernel_modules }}"
+      tags:
+        - kernel
+    
+    - name: Configure sysctl parameters for Kubernetes
+      ansible.posix.sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        sysctl_file: /etc/sysctl.d/99-kubernetes.conf
+        reload: yes
+        state: present
+      loop: "{{ k8s_sysctl_settings | dict2items }}"
+      tags:
+        - sysctl
+    
+    - name: Disable swap immediately
+      ansible.builtin.command: swapoff -a
+      when: ansible_swaptotal_mb > 0
+      changed_when: true
+      tags:
+        - sysctl
+    
+    - name: Remove swap from fstab
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        regexp: ".*swap.*"
+        state: absent
+      tags:
+        - sysctl
+    
+    # ======================================================================
+    # DIRECTORY STRUCTURE
+    # ======================================================================
+    
+    - name: Create application directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+      loop: "{{ application_directories }}"
+      tags:
+        - directories
+    
+    - name: Create monitoring directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+      loop: "{{ monitoring_directories }}"
+      tags:
+        - directories
+    
+    # ======================================================================
+    # FIREWALL CONFIGURATION
+    # ======================================================================
+    
+    - name: Configure UFW firewall (Debian/Ubuntu)
+      block:
+        - name: Enable UFW
+          community.general.ufw:
+            state: enabled
+            policy: deny
+        
+        - name: Allow SSH through UFW
+          community.general.ufw:
+            rule: allow
+            port: "22"
+            proto: tcp
+        
+        - name: Allow required ports through UFW
+          community.general.ufw:
+            rule: allow
+            port: "{{ item.port }}"
+            proto: "{{ item.protocol }}"
+          loop: "{{ firewall_ports }}"
+      when: ansible_os_family == "Debian"
+      tags:
+        - firewall
+    
+    - name: Configure firewalld (RHEL/Rocky)
+      block:
+        - name: Ensure firewalld is installed
+          ansible.builtin.yum:
+            name: firewalld
+            state: present
+        
+        - name: Ensure firewalld is enabled and running
+          ansible.builtin.systemd:
+            name: firewalld
+            state: started
+            enabled: yes
+        
+        - name: Allow required ports through firewalld
+          ansible.posix.firewalld:
+            port: "{{ item.port }}/{{ item.protocol }}"
+            permanent: yes
+            state: enabled
+            immediate: yes
+          loop: "{{ firewall_ports }}"
+      when: ansible_os_family == "RedHat"
+      tags:
+        - firewall
+    
+    # ======================================================================
+    # FILE PERMISSIONS HARDENING
+    # ======================================================================
+    
+    - name: Set secure permissions on /etc/shadow
+      ansible.builtin.file:
+        path: /etc/shadow
+        owner: root
+        group: root
+        mode: "0000"
+      tags:
+        - permissions
+    
+    - name: Set secure permissions on /etc/gshadow
+      ansible.builtin.file:
+        path: /etc/gshadow
+        owner: root
+        group: root
+        mode: "0000"
+      tags:
+        - permissions
+    
+    # ======================================================================
+    # SERVICE MANAGEMENT
+    # ======================================================================
+    
+    - name: Check if unnecessary services exist
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+      loop: "{{ services_to_disable }}"
+      register: service_status
+      failed_when: false
+      changed_when: false
+      tags:
+        - services
+    
+    - name: Disable and stop unnecessary services
+      ansible.builtin.systemd:
+        name: "{{ item.item }}"
+        state: stopped
+        enabled: no
+      loop: "{{ service_status.results }}"
+      when: item.status is defined and item.status.LoadState == "loaded"
+      tags:
+        - services
+    
+    # ======================================================================
+    # VALIDATION
+    # ======================================================================
+    
+    - name: Wait for SSH to be accessible
+      ansible.builtin.wait_for:
+        port: 22
+        host: "{{ ansible_host }}"
+        timeout: 30
+      delegate_to: localhost
+      become: no
+      tags:
+        - ssh
+        - validation
+  
+  post_tasks:
+    - name: Display completion summary
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "Baseline hardening complete for {{ inventory_hostname }}"
+          - "SSH hardening: Applied"
+          - "System users: Created"
+          - "Time sync: Configured"
+          - "Kubernetes requirements: Set"
+          - "Firewall: Configured"
+          - "============================================"

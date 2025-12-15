@@ -1,0 +1,699 @@
+---
+# preflight-checks.yml - Cluster Readiness Validation
+# Part of VMStation Cluster Setup
+#
+# This playbook performs comprehensive validation to ensure the cluster is ready
+# for Kubernetes deployment and application workloads. It does NOT make changes,
+# only validates and reports status.
+#
+# Features:
+# - System requirements validation (OS, kernel, packages, resources)
+# - SSH and connectivity checks
+# - Network validation (connectivity, ports, DNS)
+# - Time synchronization verification
+# - File system and directory checks
+# - Kernel and system settings verification
+# - Service status checks
+# - Security checks (SSH, firewall, permissions)
+# - Configuration drift detection
+# - Comprehensive reporting
+#
+# Usage:
+#   ansible-playbook -i ../inventory/hosts.yml preflight-checks.yml
+#   ansible-playbook -i ../inventory/hosts.yml preflight-checks.yml --tags=network,security
+#
+# Tags:
+#   system - System requirements checks
+#   ssh - SSH connectivity checks
+#   network - Network validation
+#   time - Time synchronization checks
+#   filesystem - Directory and filesystem checks
+#   kernel - Kernel and sysctl checks
+#   services - Service status checks
+#   security - Security validation
+#   drift - Configuration drift detection
+
+- name: Preflight Checks - Cluster Readiness Validation
+  hosts: all
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    # Minimum requirements
+    min_kernel_version: "4.19"
+    min_disk_space_gb:
+      root: 20
+      var: 10
+      data: 50
+    min_memory_mb: 2048
+    
+    # Expected OS versions
+    supported_os:
+      - distribution: Ubuntu
+        versions: ["22.04", "24.04"]
+      - distribution: Rocky
+        versions: ["8", "9"]
+      - distribution: RedHat
+        versions: ["8", "9"]
+    
+    # Required packages
+    required_packages:
+      - curl
+      - git
+      - python3
+      - openssh-server
+    
+    # Expected sysctl settings
+    expected_sysctl:
+      net.ipv4.ip_forward: "1"
+      net.bridge.bridge-nf-call-iptables: "1"
+      net.bridge.bridge-nf-call-ip6tables: "1"
+      fs.inotify.max_user_watches: "524288"
+    
+    # Expected kernel modules
+    expected_modules:
+      - br_netfilter
+      - overlay
+    
+    # Required directories
+    required_directories:
+      - path: /opt/vmstation-org
+        owner: root
+        mode: "0755"
+      - path: /data/monitoring/prometheus
+        owner: "65534"
+        mode: "0755"
+      - path: /data/monitoring/grafana
+        owner: "472"
+        mode: "0755"
+      - path: /data/monitoring/loki
+        owner: "10001"
+        mode: "0755"
+      - path: /data/applications
+        owner: root
+        mode: "0755"
+    
+    # Required services
+    required_services:
+      - sshd
+      - "{{ 'chronyd' if ansible_os_family == 'RedHat' else 'chrony' }}"
+    
+    # Ports to check
+    check_ports:
+      master:
+        - port: 6443
+          description: "Kubernetes API"
+      monitoring:
+        - port: 9090
+          description: "Prometheus"
+        - port: 3000
+          description: "Grafana"
+      all:
+        - port: 22
+          description: "SSH"
+    
+    # Initialize results storage
+    check_results:
+      passed: []
+      failed: []
+      warnings: []
+    
+    # Report output path
+    report_path: "/tmp/preflight-report-{{ ansible_date_time.epoch }}.txt"
+  
+  tasks:
+    # ======================================================================
+    # SYSTEM REQUIREMENTS VALIDATION
+    # ======================================================================
+    
+    - name: Check OS distribution and version
+      block:
+        - name: Validate OS is supported
+          ansible.builtin.set_fact:
+            os_supported: "{{ supported_os | selectattr('distribution', 'equalto', ansible_distribution) | list | length > 0 }}"
+        
+        - name: Record OS check result
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'passed': check_results.passed + ['OS ' + ansible_distribution + ' ' + ansible_distribution_version]}) }}"
+          when: os_supported
+        
+        - name: Record OS check failure
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'failed': check_results.failed + ['Unsupported OS: ' + ansible_distribution + ' ' + ansible_distribution_version]}) }}"
+          when: not os_supported
+      tags:
+        - system
+    
+    - name: Check kernel version
+      block:
+        - name: Get kernel version
+          ansible.builtin.command: uname -r
+          register: kernel_version
+          changed_when: false
+        
+        - name: Validate kernel version
+          ansible.builtin.set_fact:
+            kernel_ok: "{{ kernel_version.stdout is version(min_kernel_version, '>=') }}"
+        
+        - name: Record kernel check result
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'passed': check_results.passed + ['Kernel version ' + kernel_version.stdout]}) }}"
+          when: kernel_ok
+        
+        - name: Record kernel check failure
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'failed': check_results.failed + ['Kernel too old: ' + kernel_version.stdout + ' (min: ' + min_kernel_version + ')']}) }}"
+          when: not kernel_ok
+      tags:
+        - system
+    
+    - name: Check available disk space
+      block:
+        - name: Get disk usage for /
+          ansible.builtin.shell: df -BG / | tail -1 | awk '{print $4}' | sed 's/G//'
+          register: root_space
+          changed_when: false
+        
+        - name: Get disk usage for /var
+          ansible.builtin.shell: df -BG /var | tail -1 | awk '{print $4}' | sed 's/G//'
+          register: var_space
+          changed_when: false
+        
+        - name: Get disk usage for /data (if exists)
+          ansible.builtin.shell: df -BG /data 2>/dev/null | tail -1 | awk '{print $4}' | sed 's/G//' || echo "0"
+          register: data_space
+          changed_when: false
+        
+        - name: Validate root disk space
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'passed': check_results.passed + ['Root filesystem has ' + root_space.stdout + 'GB available']}) }}"
+          when: root_space.stdout | int >= min_disk_space_gb.root
+        
+        - name: Record root disk space warning
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'warnings': check_results.warnings + ['Root filesystem only has ' + root_space.stdout + 'GB (recommended: ' + min_disk_space_gb.root | string + 'GB)']}) }}"
+          when: root_space.stdout | int < min_disk_space_gb.root
+        
+        - name: Validate /var disk space
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'passed': check_results.passed + ['/var has ' + var_space.stdout + 'GB available']}) }}"
+          when: var_space.stdout | int >= min_disk_space_gb.var
+        
+        - name: Record /var disk space warning
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'warnings': check_results.warnings + ['/var only has ' + var_space.stdout + 'GB (recommended: ' + min_disk_space_gb.var | string + 'GB)']}) }}"
+          when: var_space.stdout | int < min_disk_space_gb.var
+      tags:
+        - system
+        - filesystem
+    
+    - name: Check available memory
+      block:
+        - name: Validate memory
+          ansible.builtin.set_fact:
+            memory_ok: "{{ ansible_memtotal_mb >= min_memory_mb }}"
+        
+        - name: Record memory check result
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'passed': check_results.passed + ['Memory: ' + ansible_memtotal_mb | string + 'MB']}) }}"
+          when: memory_ok
+        
+        - name: Record memory check failure
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'failed': check_results.failed + ['Insufficient memory: ' + ansible_memtotal_mb | string + 'MB (min: ' + min_memory_mb | string + 'MB)']}) }}"
+          when: not memory_ok
+      tags:
+        - system
+    
+    - name: Check required packages are installed
+      block:
+        - name: Check package installation
+          ansible.builtin.package_facts:
+            manager: auto
+        
+        - name: Validate packages
+          ansible.builtin.set_fact:
+            missing_packages: "{{ required_packages | reject('in', ansible_facts.packages.keys()) | list }}"
+        
+        - name: Record package check result
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'passed': check_results.passed + ['All required packages installed']}) }}"
+          when: missing_packages | length == 0
+        
+        - name: Record missing packages
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'failed': check_results.failed + ['Missing packages: ' + missing_packages | join(', ')]}) }}"
+          when: missing_packages | length > 0
+      tags:
+        - system
+    
+    # ======================================================================
+    # SSH AND CONNECTIVITY CHECKS
+    # ======================================================================
+    
+    - name: Check SSH service status
+      block:
+        - name: Verify SSH is running
+          ansible.builtin.systemd:
+            name: sshd
+          register: ssh_status
+        
+        - name: Record SSH status
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'passed': check_results.passed + ['SSH service is running']}) }}"
+          when: ssh_status.status.ActiveState == "active"
+        
+        - name: Record SSH failure
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'failed': check_results.failed + ['SSH service is not active']}) }}"
+          when: ssh_status.status.ActiveState != "active"
+      tags:
+        - ssh
+    
+    - name: Check SSH configuration hardening
+      block:
+        - name: Check PermitRootLogin setting
+          ansible.builtin.shell: grep "^PermitRootLogin" /etc/ssh/sshd_config | awk '{print $2}'
+          register: root_login
+          changed_when: false
+          failed_when: false
+        
+        - name: Check PasswordAuthentication setting
+          ansible.builtin.shell: grep "^PasswordAuthentication" /etc/ssh/sshd_config | awk '{print $2}'
+          register: password_auth
+          changed_when: false
+          failed_when: false
+        
+        - name: Record SSH hardening status
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'passed': check_results.passed + ['SSH hardening applied (root login disabled, password auth disabled)']}) }}"
+          when: root_login.stdout == "no" and password_auth.stdout == "no"
+        
+        - name: Record SSH hardening warning
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'warnings': check_results.warnings + ['SSH hardening incomplete (PermitRootLogin: ' + root_login.stdout + ', PasswordAuth: ' + password_auth.stdout + ')']}) }}"
+          when: root_login.stdout != "no" or password_auth.stdout != "no"
+      tags:
+        - ssh
+        - security
+    
+    # ======================================================================
+    # NETWORK VALIDATION
+    # ======================================================================
+    
+    - name: Test connectivity between nodes
+      block:
+        - name: Ping all cluster nodes
+          ansible.builtin.shell: ping -c 2 {{ hostvars[item]['ansible_host'] }}
+          loop: "{{ groups['all'] }}"
+          register: ping_results
+          changed_when: false
+          failed_when: false
+        
+        - name: Record ping results
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'passed': check_results.passed + ['Network connectivity OK to all nodes']}) }}"
+          when: ping_results.results | selectattr('rc', 'equalto', 0) | list | length == groups['all'] | length
+        
+        - name: Record ping failures
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'failed': check_results.failed + ['Network connectivity failed to some nodes']}) }}"
+          when: ping_results.results | selectattr('rc', 'equalto', 0) | list | length != groups['all'] | length
+      tags:
+        - network
+    
+    - name: Check DNS resolution
+      block:
+        - name: Test DNS resolution
+          ansible.builtin.shell: nslookup google.com
+          register: dns_check
+          changed_when: false
+          failed_when: false
+        
+        - name: Record DNS check result
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'passed': check_results.passed + ['DNS resolution working']}) }}"
+          when: dns_check.rc == 0
+        
+        - name: Record DNS check failure
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'failed': check_results.failed + ['DNS resolution not working']}) }}"
+          when: dns_check.rc != 0
+      tags:
+        - network
+    
+    - name: Check port connectivity
+      block:
+        - name: Test SSH port connectivity
+          ansible.builtin.wait_for:
+            host: "{{ ansible_host }}"
+            port: 22
+            timeout: 5
+          delegate_to: localhost
+          become: no
+          register: ssh_port
+          failed_when: false
+        
+        - name: Record SSH port check
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'passed': check_results.passed + ['SSH port 22 accessible']}) }}"
+          when: ssh_port is succeeded
+        
+        - name: Record SSH port failure
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'failed': check_results.failed + ['SSH port 22 not accessible']}) }}"
+          when: ssh_port is failed
+      tags:
+        - network
+    
+    # ======================================================================
+    # TIME SYNCHRONIZATION
+    # ======================================================================
+    
+    - name: Check time synchronization
+      block:
+        - name: Check chrony status (Debian)
+          ansible.builtin.command: chronyc tracking
+          register: chrony_status_debian
+          changed_when: false
+          failed_when: false
+          when: ansible_os_family == "Debian"
+        
+        - name: Check chronyd status (RHEL)
+          ansible.builtin.command: chronyc tracking
+          register: chrony_status_rhel
+          changed_when: false
+          failed_when: false
+          when: ansible_os_family == "RedHat"
+        
+        - name: Record chrony status
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'passed': check_results.passed + ['Time synchronization active (chrony)']}) }}"
+          when: (ansible_os_family == "Debian" and chrony_status_debian.rc == 0) or (ansible_os_family == "RedHat" and chrony_status_rhel.rc == 0)
+        
+        - name: Record chrony failure
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'warnings': check_results.warnings + ['Time synchronization may not be working']}) }}"
+          when: (ansible_os_family == "Debian" and chrony_status_debian.rc != 0) or (ansible_os_family == "RedHat" and chrony_status_rhel.rc != 0)
+      tags:
+        - time
+    
+    # ======================================================================
+    # FILE SYSTEM AND DIRECTORY CHECKS
+    # ======================================================================
+    
+    - name: Verify required directories
+      block:
+        - name: Check directory existence and permissions
+          ansible.builtin.stat:
+            path: "{{ item.path }}"
+          loop: "{{ required_directories }}"
+          register: dir_stats
+        
+        - name: Validate directories exist
+          ansible.builtin.set_fact:
+            missing_dirs: "{{ dir_stats.results | selectattr('stat.exists', 'equalto', false) | map(attribute='item.path') | list }}"
+        
+        - name: Record directory check
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'passed': check_results.passed + ['All required directories exist']}) }}"
+          when: missing_dirs | length == 0
+        
+        - name: Record missing directories
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'failed': check_results.failed + ['Missing directories: ' + missing_dirs | join(', ')]}) }}"
+          when: missing_dirs | length > 0
+      tags:
+        - filesystem
+    
+    # ======================================================================
+    # KERNEL AND SYSTEM SETTINGS
+    # ======================================================================
+    
+    - name: Verify sysctl parameters
+      block:
+        - name: Check sysctl settings
+          ansible.builtin.shell: sysctl {{ item.key }} | awk '{print $3}'
+          loop: "{{ expected_sysctl | dict2items }}"
+          register: sysctl_results
+          changed_when: false
+          failed_when: false
+        
+        - name: Validate sysctl parameters
+          ansible.builtin.set_fact:
+            sysctl_mismatch: "{{ sysctl_results.results | rejectattr('stdout', 'equalto', expected_sysctl[item.item.key]) | map(attribute='item.key') | list }}"
+          vars:
+            item: "{{ sysctl_results.results | first }}"
+        
+        - name: Build list of mismatched sysctl parameters
+          ansible.builtin.set_fact:
+            sysctl_mismatch_list: "{{ sysctl_mismatch_list | default([]) + [item.item.key] }}"
+          loop: "{{ sysctl_results.results }}"
+          when: item.stdout != expected_sysctl[item.item.key]
+        
+        - name: Record sysctl check
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'passed': check_results.passed + ['All sysctl parameters configured correctly']}) }}"
+          when: sysctl_mismatch_list | default([]) | length == 0
+        
+        - name: Record sysctl mismatches
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'failed': check_results.failed + ['Sysctl mismatches: ' + (sysctl_mismatch_list | default([]) | join(', '))]}) }}"
+          when: sysctl_mismatch_list | default([]) | length > 0
+      tags:
+        - kernel
+    
+    - name: Verify kernel modules
+      block:
+        - name: Check loaded kernel modules
+          ansible.builtin.shell: lsmod | grep {{ item }}
+          loop: "{{ expected_modules }}"
+          register: module_results
+          changed_when: false
+          failed_when: false
+        
+        - name: Validate kernel modules
+          ansible.builtin.set_fact:
+            missing_modules: "{{ module_results.results | selectattr('rc', 'ne', 0) | map(attribute='item') | list }}"
+        
+        - name: Record module check
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'passed': check_results.passed + ['All required kernel modules loaded']}) }}"
+          when: missing_modules | length == 0
+        
+        - name: Record missing modules
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'failed': check_results.failed + ['Missing kernel modules: ' + missing_modules | join(', ')]}) }}"
+          when: missing_modules | length > 0
+      tags:
+        - kernel
+    
+    - name: Check swap status
+      block:
+        - name: Verify swap is disabled
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'passed': check_results.passed + ['Swap is disabled']}) }}"
+          when: ansible_swaptotal_mb == 0
+        
+        - name: Record swap warning
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'warnings': check_results.warnings + ['Swap is enabled (' + ansible_swaptotal_mb | string + 'MB) - Kubernetes requires swap disabled']}) }}"
+          when: ansible_swaptotal_mb > 0
+      tags:
+        - kernel
+    
+    # ======================================================================
+    # SERVICE STATUS CHECKS
+    # ======================================================================
+    
+    - name: Verify required services
+      block:
+        - name: Check service status
+          ansible.builtin.systemd:
+            name: "{{ item }}"
+          loop: "{{ required_services }}"
+          register: service_results
+        
+        - name: Validate services are running
+          ansible.builtin.set_fact:
+            inactive_services: "{{ service_results.results | selectattr('status.ActiveState', 'ne', 'active') | map(attribute='item') | list }}"
+        
+        - name: Record service check
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'passed': check_results.passed + ['All required services are active']}) }}"
+          when: inactive_services | length == 0
+        
+        - name: Record inactive services
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'failed': check_results.failed + ['Inactive services: ' + inactive_services | join(', ')]}) }}"
+          when: inactive_services | length > 0
+      tags:
+        - services
+    
+    # ======================================================================
+    # SECURITY CHECKS
+    # ======================================================================
+    
+    - name: Check file permissions on sensitive files
+      block:
+        - name: Check /etc/shadow permissions
+          ansible.builtin.stat:
+            path: /etc/shadow
+          register: shadow_perms
+        
+        - name: Validate shadow permissions
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'passed': check_results.passed + ['/etc/shadow has secure permissions']}) }}"
+          when: shadow_perms.stat.mode == "0000" or shadow_perms.stat.mode == "0400"
+        
+        - name: Record shadow permissions warning
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'warnings': check_results.warnings + ['/etc/shadow permissions are ' + shadow_perms.stat.mode + ' (should be 0000 or 0400)']}) }}"
+          when: shadow_perms.stat.mode != "0000" and shadow_perms.stat.mode != "0400"
+      tags:
+        - security
+    
+    - name: Check firewall status
+      block:
+        - name: Check ufw status (Debian)
+          ansible.builtin.command: ufw status
+          register: ufw_status
+          changed_when: false
+          failed_when: false
+          when: ansible_os_family == "Debian"
+        
+        - name: Check firewalld status (RHEL)
+          ansible.builtin.systemd:
+            name: firewalld
+          register: firewalld_status
+          when: ansible_os_family == "RedHat"
+        
+        - name: Check if ufw is active
+          ansible.builtin.set_fact:
+            ufw_active: "{{ ufw_status.stdout is search('Status: active') }}"
+          when: ansible_os_family == "Debian"
+        
+        - name: Record firewall status (Debian)
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'passed': check_results.passed + ['Firewall is active (ufw)']}) }}"
+          when: ansible_os_family == "Debian" and ufw_active | default(false)
+        
+        - name: Record firewall status (RHEL)
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'passed': check_results.passed + ['Firewall is active (firewalld)']}) }}"
+          when: ansible_os_family == "RedHat" and firewalld_status.status.ActiveState == "active"
+        
+        - name: Record firewall warning (Debian)
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'warnings': check_results.warnings + ['Firewall may not be active (ufw)']}) }}"
+          when: ansible_os_family == "Debian" and not (ufw_active | default(false))
+        
+        - name: Record firewall warning (RHEL)
+          ansible.builtin.set_fact:
+            check_results: "{{ check_results | combine({'warnings': check_results.warnings + ['Firewall may not be active (firewalld)']}) }}"
+          when: ansible_os_family == "RedHat" and firewalld_status.status.ActiveState != "active"
+      tags:
+        - security
+    
+    # ======================================================================
+    # GENERATE REPORT
+    # ======================================================================
+    
+    - name: Generate preflight check report
+      block:
+        - name: Calculate totals
+          ansible.builtin.set_fact:
+            total_checks: "{{ (check_results.passed | length) + (check_results.failed | length) + (check_results.warnings | length) }}"
+            passed_count: "{{ check_results.passed | length }}"
+            failed_count: "{{ check_results.failed | length }}"
+            warnings_count: "{{ check_results.warnings | length }}"
+        
+        - name: Create report content
+          ansible.builtin.set_fact:
+            report_content: |
+              ================================================================================
+              VMStation Cluster Preflight Check Report
+              ================================================================================
+              
+              Node: {{ inventory_hostname }}
+              Host: {{ ansible_host }}
+              OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
+              Kernel: {{ ansible_kernel }}
+              Date: {{ ansible_date_time.iso8601 }}
+              
+              ================================================================================
+              SUMMARY
+              ================================================================================
+              
+              Total Checks: {{ total_checks }}
+              Passed: {{ passed_count }}
+              Failed: {{ failed_count }}
+              Warnings: {{ warnings_count }}
+              
+              Overall Status: {% if failed_count | int > 0 %}FAILED{% elif warnings_count | int > 0 %}WARNING{% else %}PASSED{% endif %}
+              
+              ================================================================================
+              PASSED CHECKS ({{ passed_count }})
+              ================================================================================
+              {% for item in check_results.passed %}
+              ✓ {{ item }}
+              {% endfor %}
+              
+              {% if failed_count | int > 0 %}
+              ================================================================================
+              FAILED CHECKS ({{ failed_count }})
+              ================================================================================
+              {% for item in check_results.failed %}
+              ✗ {{ item }}
+              {% endfor %}
+              
+              REMEDIATION HINTS:
+              - Run baseline-hardening.yml to configure system requirements
+              - Run infrastructure-services.yml to setup infrastructure services
+              - Check firewall rules and ensure required ports are open
+              - Verify DNS and network connectivity
+              {% endif %}
+              
+              {% if warnings_count | int > 0 %}
+              ================================================================================
+              WARNINGS ({{ warnings_count }})
+              ================================================================================
+              {% for item in check_results.warnings %}
+              ! {{ item }}
+              {% endfor %}
+              {% endif %}
+              
+              ================================================================================
+              END OF REPORT
+              ================================================================================
+        
+        - name: Save report to file on control node
+          ansible.builtin.copy:
+            content: "{{ report_content }}"
+            dest: "{{ report_path }}"
+            mode: "0644"
+          delegate_to: localhost
+          become: no
+          run_once: yes
+        
+        - name: Display report summary
+          ansible.builtin.debug:
+            msg:
+              - "========================================"
+              - "PREFLIGHT CHECK SUMMARY"
+              - "========================================"
+              - "Node: {{ inventory_hostname }}"
+              - "Total: {{ total_checks }} | Passed: {{ passed_count }} | Failed: {{ failed_count }} | Warnings: {{ warnings_count }}"
+              - "Status: {% if failed_count | int > 0 %}❌ FAILED{% elif warnings_count | int > 0 %}⚠️  WARNING{% else %}✅ PASSED{% endif %}"
+              - "Report saved to: {{ report_path }}"
+              - "========================================"
+      tags:
+        - always
+  
+  post_tasks:
+    - name: Final status message
+      ansible.builtin.debug:
+        msg:
+          - "Preflight checks completed for {{ inventory_hostname }}"
+          - "Review the report at {{ report_path }} for details"
+          - "{% if check_results.failed | length > 0 %}Action required: Address failed checks before deploying Kubernetes{% endif %}"

@@ -1,0 +1,546 @@
+---
+# infrastructure-services.yml - Infrastructure Services Deployment
+# Part of VMStation Cluster Setup
+#
+# This playbook deploys and configures core infrastructure services required
+# for the VMStation Kubernetes environment. Run after baseline-hardening.yml
+# and before deploying Kubernetes.
+#
+# Features:
+# - DNS resolution configuration
+# - System logging (rsyslog/journald) configuration
+# - NFS client setup and storage mounting
+# - Monitoring stack preparation
+# - Application stack preparation
+# - Service validation
+#
+# Usage:
+#   ansible-playbook -i ../inventory/hosts.yml infrastructure-services.yml
+#   ansible-playbook -i ../inventory/hosts.yml infrastructure-services.yml --check  # Dry run
+#   ansible-playbook -i ../inventory/hosts.yml infrastructure-services.yml --tags=dns,storage
+#
+# Tags:
+#   ntp - Time synchronization (if not configured in baseline)
+#   dns - DNS resolution configuration
+#   logging - System logging configuration
+#   storage - NFS and storage preparation
+#   monitoring - Monitoring stack preparation
+#   applications - Application stack preparation
+#   validation - Service validation
+
+- name: Infrastructure Services Deployment
+  hosts: all
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    # DNS nameservers (can be overridden)
+    dns_nameservers:
+      - 8.8.8.8
+      - 8.8.4.4
+      - 1.1.1.1
+    
+    # DNS search domains
+    dns_search_domains:
+      - "{{ cluster_domain | default('vmstation.local') }}"
+    
+    # NFS mounts (example - customize per environment)
+    nfs_mounts: []
+    # Example:
+    # - path: /mnt/nfs/media
+    #   src: 192.168.1.100:/export/media
+    #   opts: defaults,noatime
+    #   state: mounted
+    
+    # Log retention settings
+    log_retention_days: 30
+    log_max_size_mb: 100
+    
+    # Enable systemd-resolved for DNS
+    use_systemd_resolved: true
+    
+    # Central log server (if applicable)
+    central_log_server: ""
+    central_log_port: 514
+    
+    # Additional sysctl for monitoring performance
+    monitoring_sysctl_settings:
+      net.core.netdev_max_backlog: 5000
+      net.core.rmem_max: 134217728
+      net.core.wmem_max: 134217728
+      net.ipv4.tcp_rmem: "4096 87380 67108864"
+      net.ipv4.tcp_wmem: "4096 65536 67108864"
+  
+  handlers:
+    - name: Restart systemd-resolved
+      ansible.builtin.systemd:
+        name: systemd-resolved
+        state: restarted
+      listen: restart_resolved
+    
+    - name: Restart rsyslog
+      ansible.builtin.systemd:
+        name: rsyslog
+        state: restarted
+      listen: restart_rsyslog
+    
+    - name: Restart chrony
+      ansible.builtin.systemd:
+        name: chrony
+        state: restarted
+      when: ansible_os_family == "Debian"
+      listen: restart_chrony
+    
+    - name: Restart chronyd
+      ansible.builtin.systemd:
+        name: chronyd
+        state: restarted
+      when: ansible_os_family == "RedHat"
+      listen: restart_chrony
+    
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: yes
+      listen: systemd_reload
+    
+    - name: Apply sysctl
+      ansible.builtin.command: sysctl --system
+      changed_when: true
+      listen: reload_sysctl
+  
+  pre_tasks:
+    - name: Display execution information
+      ansible.builtin.debug:
+        msg: "Configuring infrastructure services on {{ inventory_hostname }} ({{ ansible_host }})"
+    
+    - name: Validate connectivity
+      ansible.builtin.ping:
+  
+  tasks:
+    # ======================================================================
+    # DNS CONFIGURATION
+    # ======================================================================
+    
+    - name: Install systemd-resolved (if not present)
+      ansible.builtin.package:
+        name: systemd
+        state: present
+      when: use_systemd_resolved
+      tags:
+        - dns
+    
+    - name: Check if systemd-resolved is available
+      ansible.builtin.stat:
+        path: /etc/systemd/resolved.conf
+      register: resolved_conf
+      tags:
+        - dns
+    
+    - name: Configure systemd-resolved DNS
+      ansible.builtin.blockinfile:
+        path: /etc/systemd/resolved.conf
+        block: |
+          [Resolve]
+          DNS={{ dns_nameservers | join(' ') }}
+          Domains={{ dns_search_domains | join(' ') }}
+          LLMNR=no
+          MulticastDNS=no
+        marker: "# {mark} VMSTATION MANAGED BLOCK"
+        backup: yes
+      when: use_systemd_resolved and resolved_conf.stat.exists
+      notify: restart_resolved
+      tags:
+        - dns
+    
+    - name: Enable and start systemd-resolved
+      ansible.builtin.systemd:
+        name: systemd-resolved
+        state: started
+        enabled: yes
+      when: use_systemd_resolved and resolved_conf.stat.exists
+      tags:
+        - dns
+    
+    - name: Create symlink for resolv.conf (systemd-resolved)
+      ansible.builtin.file:
+        src: /run/systemd/resolve/resolv.conf
+        dest: /etc/resolv.conf
+        state: link
+        force: yes
+      when: use_systemd_resolved and resolved_conf.stat.exists
+      tags:
+        - dns
+    
+    - name: Configure /etc/resolv.conf directly (if not using systemd-resolved)
+      ansible.builtin.template:
+        dest: /etc/resolv.conf
+        content: |
+          # VMStation DNS Configuration
+          {% for domain in dns_search_domains %}
+          search {{ domain }}
+          {% endfor %}
+          {% for ns in dns_nameservers %}
+          nameserver {{ ns }}
+          {% endfor %}
+        owner: root
+        group: root
+        mode: "0644"
+      when: not use_systemd_resolved or not resolved_conf.stat.exists
+      tags:
+        - dns
+    
+    # ======================================================================
+    # LOGGING CONFIGURATION
+    # ======================================================================
+    
+    - name: Install rsyslog
+      ansible.builtin.package:
+        name: rsyslog
+        state: present
+      tags:
+        - logging
+    
+    - name: Configure log rotation for rsyslog
+      ansible.builtin.template:
+        dest: /etc/logrotate.d/rsyslog
+        content: |
+          /var/log/syslog
+          /var/log/mail.info
+          /var/log/mail.warn
+          /var/log/mail.err
+          /var/log/mail.log
+          /var/log/daemon.log
+          /var/log/kern.log
+          /var/log/auth.log
+          /var/log/user.log
+          /var/log/lpr.log
+          /var/log/cron.log
+          /var/log/debug
+          /var/log/messages
+          {
+              rotate {{ log_retention_days }}
+              daily
+              missingok
+              notifempty
+              compress
+              delaycompress
+              sharedscripts
+              maxsize {{ log_max_size_mb }}M
+              postrotate
+                  {% if ansible_os_family == "Debian" %}
+                  [ -f /var/run/rsyslogd.pid ] && /usr/bin/killall -HUP rsyslogd || true
+                  {% else %}
+                  /bin/systemctl reload-or-restart rsyslog > /dev/null 2>&1 || true
+                  {% endif %}
+              endscript
+          }
+        owner: root
+        group: root
+        mode: "0644"
+      tags:
+        - logging
+    
+    - name: Configure journald retention
+      ansible.builtin.lineinfile:
+        path: /etc/systemd/journald.conf
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        state: present
+      loop:
+        - regexp: "^#?SystemMaxUse="
+          line: "SystemMaxUse=500M"
+        - regexp: "^#?SystemMaxFileSize="
+          line: "SystemMaxFileSize=50M"
+        - regexp: "^#?MaxRetentionSec="
+          line: "MaxRetentionSec={{ log_retention_days * 86400 }}"
+      notify: systemd_reload
+      tags:
+        - logging
+    
+    - name: Configure remote syslog forwarding (if central server defined)
+      ansible.builtin.blockinfile:
+        path: /etc/rsyslog.d/50-central-logging.conf
+        block: |
+          # Forward logs to central server
+          *.* @@{{ central_log_server }}:{{ central_log_port }}
+        marker: "# {mark} VMSTATION MANAGED BLOCK"
+        create: yes
+        mode: "0644"
+      when: central_log_server | length > 0
+      notify: restart_rsyslog
+      tags:
+        - logging
+    
+    - name: Ensure rsyslog is enabled and running
+      ansible.builtin.systemd:
+        name: rsyslog
+        state: started
+        enabled: yes
+      tags:
+        - logging
+    
+    # ======================================================================
+    # STORAGE PREPARATION
+    # ======================================================================
+    
+    - name: Install NFS client utilities (Debian/Ubuntu)
+      ansible.builtin.apt:
+        name:
+          - nfs-common
+          - nfs4-acl-tools
+        state: present
+      when: ansible_os_family == "Debian"
+      tags:
+        - storage
+    
+    - name: Install NFS client utilities (RHEL/Rocky)
+      ansible.builtin.yum:
+        name:
+          - nfs-utils
+          - nfs4-acl-tools
+        state: present
+      when: ansible_os_family == "RedHat"
+      tags:
+        - storage
+    
+    - name: Ensure rpcbind is enabled and running
+      ansible.builtin.systemd:
+        name: rpcbind
+        state: started
+        enabled: yes
+      tags:
+        - storage
+    
+    - name: Create NFS mount point directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        mode: "0755"
+      loop: "{{ nfs_mounts }}"
+      when: nfs_mounts | length > 0
+      tags:
+        - storage
+    
+    - name: Mount NFS shares
+      ansible.posix.mount:
+        path: "{{ item.path }}"
+        src: "{{ item.src }}"
+        fstype: nfs
+        opts: "{{ item.opts | default('defaults,noatime') }}"
+        state: "{{ item.state | default('mounted') }}"
+      loop: "{{ nfs_mounts }}"
+      when: nfs_mounts | length > 0
+      tags:
+        - storage
+    
+    # ======================================================================
+    # MONITORING STACK PREPARATION
+    # ======================================================================
+    
+    - name: Ensure monitoring system users exist
+      ansible.builtin.user:
+        name: "{{ item.name }}"
+        uid: "{{ item.uid }}"
+        group: "{{ item.name }}"
+        system: yes
+        create_home: yes
+        state: present
+      loop:
+        - name: prometheus
+          uid: 65534
+        - name: grafana
+          uid: 472
+        - name: loki
+          uid: 10001
+      tags:
+        - monitoring
+    
+    - name: Ensure required kernel modules for monitoring
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - nf_conntrack
+        - xt_conntrack
+      tags:
+        - monitoring
+    
+    - name: Configure sysctl parameters for monitoring performance
+      ansible.posix.sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        sysctl_file: /etc/sysctl.d/98-monitoring.conf
+        reload: yes
+        state: present
+      loop: "{{ monitoring_sysctl_settings | dict2items }}"
+      tags:
+        - monitoring
+    
+    # ======================================================================
+    # APPLICATION STACK PREPARATION
+    # ======================================================================
+    
+    - name: Check if Helm is installed
+      ansible.builtin.command: which helm
+      register: helm_check
+      changed_when: false
+      failed_when: false
+      tags:
+        - applications
+    
+    - name: Install Helm (if not present)
+      block:
+        - name: Download Helm install script
+          ansible.builtin.get_url:
+            url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+            dest: /tmp/get_helm.sh
+            mode: "0700"
+        
+        - name: Install Helm
+          ansible.builtin.command: /tmp/get_helm.sh
+          changed_when: true
+        
+        - name: Remove Helm install script
+          ansible.builtin.file:
+            path: /tmp/get_helm.sh
+            state: absent
+      when: helm_check.rc != 0
+      tags:
+        - applications
+    
+    - name: Check if kubectl is installed
+      ansible.builtin.command: which kubectl
+      register: kubectl_check
+      changed_when: false
+      failed_when: false
+      tags:
+        - applications
+    
+    - name: Install kubectl (if not present)
+      block:
+        - name: Get latest stable kubectl version (Debian/Ubuntu)
+          ansible.builtin.uri:
+            url: https://dl.k8s.io/release/stable.txt
+            return_content: yes
+          register: kubectl_version
+          when: ansible_os_family == "Debian"
+        
+        - name: Download kubectl binary (Debian/Ubuntu)
+          ansible.builtin.get_url:
+            url: "https://dl.k8s.io/release/{{ kubectl_version.content | trim }}/bin/linux/amd64/kubectl"
+            dest: /usr/local/bin/kubectl
+            mode: "0755"
+          when: ansible_os_family == "Debian"
+        
+        - name: Install kubectl (RHEL/Rocky)
+          ansible.builtin.yum_repository:
+            name: kubernetes
+            description: Kubernetes
+            baseurl: https://pkgs.k8s.io/core:/stable:/v{{ k8s_version | default('1.29') }}/rpm/
+            enabled: yes
+            gpgcheck: yes
+            gpgkey: https://pkgs.k8s.io/core:/stable:/v{{ k8s_version | default('1.29') }}/rpm/repodata/repomd.xml.key
+          when: ansible_os_family == "RedHat"
+        
+        - name: Install kubectl package (RHEL/Rocky)
+          ansible.builtin.yum:
+            name: kubectl
+            state: present
+          when: ansible_os_family == "RedHat"
+      when: kubectl_check.rc != 0
+      tags:
+        - applications
+    
+    - name: Install container runtime utilities
+      ansible.builtin.package:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - jq
+        - yq
+      when: ansible_os_family == "Debian" or ansible_os_family == "RedHat"
+      failed_when: false
+      tags:
+        - applications
+    
+    # ======================================================================
+    # SERVICE VALIDATION
+    # ======================================================================
+    
+    - name: Verify chrony/chronyd is running
+      ansible.builtin.systemd:
+        name: "{{ 'chronyd' if ansible_os_family == 'RedHat' else 'chrony' }}"
+        state: started
+      check_mode: yes
+      register: chrony_status
+      tags:
+        - validation
+    
+    - name: Verify rsyslog is running
+      ansible.builtin.systemd:
+        name: rsyslog
+        state: started
+      check_mode: yes
+      register: rsyslog_status
+      tags:
+        - validation
+    
+    - name: Verify rpcbind is running
+      ansible.builtin.systemd:
+        name: rpcbind
+        state: started
+      check_mode: yes
+      register: rpcbind_status
+      tags:
+        - validation
+    
+    - name: Check DNS resolution
+      ansible.builtin.command: nslookup google.com
+      register: dns_check
+      changed_when: false
+      failed_when: dns_check.rc != 0
+      tags:
+        - validation
+    
+    - name: Check NTP synchronization
+      ansible.builtin.command: chronyc tracking
+      register: ntp_sync
+      changed_when: false
+      failed_when: false
+      when: ansible_os_family == "Debian"
+      tags:
+        - validation
+    
+    - name: Check NTP synchronization (RHEL/Rocky)
+      ansible.builtin.command: chronyc tracking
+      register: ntp_sync_rhel
+      changed_when: false
+      failed_when: false
+      when: ansible_os_family == "RedHat"
+      tags:
+        - validation
+    
+    - name: Verify services start on boot
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: yes
+      loop:
+        - "{{ 'chronyd' if ansible_os_family == 'RedHat' else 'chrony' }}"
+        - rsyslog
+        - rpcbind
+      check_mode: yes
+      tags:
+        - validation
+  
+  post_tasks:
+    - name: Display completion summary
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "Infrastructure services configured for {{ inventory_hostname }}"
+          - "DNS: {{ 'systemd-resolved' if use_systemd_resolved else 'resolv.conf' }}"
+          - "Logging: rsyslog + journald"
+          - "Storage: NFS client ready"
+          - "Monitoring: Users and settings configured"
+          - "Applications: Helm and kubectl available"
+          - "============================================"
