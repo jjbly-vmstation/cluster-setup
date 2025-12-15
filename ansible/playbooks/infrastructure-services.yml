@@ -184,7 +184,7 @@
         - dns
 
     - name: Configure /etc/resolv.conf directly (if not using systemd-resolved)
-      ansible.builtin.template:
+      ansible.builtin.copy:
         dest: /etc/resolv.conf
         content: |
           # VMStation DNS Configuration
