@@ -1,0 +1,5 @@
+# DEPRECATED: This playbook is no longer supported.
+# Purpose: Spin down cluster nodes for power saving (legacy, unreliable)
+# Do not use in production. See README.md for details.
+---
+# ...original playbook content would be here if retained for reference...

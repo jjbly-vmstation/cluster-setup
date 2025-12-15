@@ -1,0 +1,437 @@
+---
+# deploy-event-wake.yml - Deploy Wake-on-LAN event handler
+# Part of VMStation Cluster Setup
+#
+# This playbook deploys event-driven wake functionality:
+# - HTTP webhook endpoint for wake triggers
+# - Systemd service for event handling
+# - Integration with monitoring systems
+# - Wake verification and logging
+#
+# Usage:
+#   ansible-playbook -i /srv/vmstation-org/cluster-setup/ansible/inventory/hosts.yml playbooks/deploy-event-wake.yml
+
+- name: Deploy Wake Event Handler
+  hosts: masters
+  become: true
+  gather_facts: true
+  
+  vars:
+    # Event handler configuration
+    wake_handler_port: 9876
+    wake_handler_bind: "0.0.0.0"
+    
+    # Directories
+    handler_dir: /opt/vmstation/wake-handler
+    config_dir: /etc/vmstation
+    log_dir: /var/log/vmstation
+    
+    # Wake settings
+    wake_retry_count: 3
+    wake_retry_delay: 10
+    wake_verification_timeout: 120
+    
+    # Security
+    wake_auth_enabled: true
+    wake_auth_token: "{{ lookup('env', 'VMSTATION_WAKE_TOKEN') | default('changeme', true) }}"
+    
+    # Notification
+    notification_on_wake: true
+    notification_webhook_url: ""
+
+  handlers:
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+        
+    - name: Restart wake handler
+      ansible.builtin.systemd:
+        name: vmstation-wake-event.service
+        state: restarted
+        enabled: true
+
+  tasks:
+    - name: Display deployment information
+      ansible.builtin.debug:
+        msg: |
+          Deploying wake event handler on {{ inventory_hostname }}
+          Port: {{ wake_handler_port }}
+          Auth enabled: {{ wake_auth_enabled }}
+
+    # Create directories
+    - name: Create handler directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - "{{ handler_dir }}"
+        - "{{ config_dir }}"
+        - "{{ log_dir }}"
+      tags:
+        - directories
+
+    # Install dependencies
+    - name: Install Python dependencies (Debian/Ubuntu)
+      ansible.builtin.apt:
+        name:
+          - python3
+          - python3-pip
+          - python3-flask
+          - wakeonlan
+        state: present
+      when: ansible_os_family == "Debian"
+      tags:
+        - packages
+
+    - name: Install Python dependencies (RedHat/CentOS)
+      ansible.builtin.yum:
+        name:
+          - python3
+          - python3-pip
+        state: present
+      when: ansible_os_family == "RedHat"
+      tags:
+        - packages
+
+    - name: Install Flask via pip
+      ansible.builtin.pip:
+        name: flask
+        state: present
+        executable: pip3
+      tags:
+        - packages
+
+    # Deploy wake handler script
+    - name: Deploy wake event handler
+      ansible.builtin.copy:
+        content: |
+          #!/usr/bin/env python3
+          """
+          VMStation Wake Event Handler
+          
+          A simple HTTP server that handles wake-on-LAN requests.
+          
+          Endpoints:
+            GET  /health          - Health check
+            POST /wake/<hostname> - Wake specific node
+            POST /wake/all        - Wake all nodes
+            GET  /status          - Get cluster power status
+          """
+          
+          import os
+          import sys
+          import json
+          import subprocess
+          import logging
+          from datetime import datetime
+          from pathlib import Path
+          
+          from flask import Flask, request, jsonify
+          
+          app = Flask(__name__)
+          
+          # Configuration
+          CONFIG_DIR = "{{ config_dir }}"
+          LOG_DIR = "{{ log_dir }}"
+          WAKE_RETRY_COUNT = {{ wake_retry_count }}
+          WAKE_RETRY_DELAY = {{ wake_retry_delay }}
+          AUTH_ENABLED = {{ wake_auth_enabled | lower }}
+          AUTH_TOKEN = "{{ wake_auth_token }}"
+          
+          # Setup logging
+          logging.basicConfig(
+              level=logging.INFO,
+              format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+              handlers=[
+                  logging.FileHandler(f"{LOG_DIR}/wake-handler.log"),
+                  logging.StreamHandler()
+              ]
+          )
+          logger = logging.getLogger("wake-handler")
+          
+          def load_wol_registry():
+              """Load WoL registry with MAC addresses."""
+              registry = {}
+              config_files = Path(CONFIG_DIR).glob("*/wol.conf")
+              
+              for config_file in config_files:
+                  try:
+                      with open(config_file) as f:
+                          node_config = {}
+                          for line in f:
+                              if '=' in line and not line.startswith('#'):
+                                  key, value = line.strip().split('=', 1)
+                                  node_config[key] = value
+                          if 'HOSTNAME' in node_config and 'MAC_ADDRESS' in node_config:
+                              registry[node_config['HOSTNAME']] = {
+                                  'mac': node_config['MAC_ADDRESS'],
+                                  'ip': node_config.get('IP_ADDRESS', ''),
+                                  'interface': node_config.get('INTERFACE', '')
+                              }
+                  except Exception as e:
+                      logger.error(f"Error loading {config_file}: {e}")
+              
+              # Also try the central registry
+              central_registry = Path("/tmp/vmstation-wol-registry.conf")
+              if central_registry.exists():
+                  # Parse the central registry format
+                  pass
+              
+              return registry
+          
+          def authenticate():
+              """Verify authentication token."""
+              if not AUTH_ENABLED:
+                  return True
+              
+              token = request.headers.get('X-Auth-Token') or request.args.get('token')
+              return token == AUTH_TOKEN
+          
+          def send_wake_packet(mac_address, retries=WAKE_RETRY_COUNT):
+              """Send Wake-on-LAN magic packet."""
+              for attempt in range(retries):
+                  try:
+                      result = subprocess.run(
+                          ['wakeonlan', mac_address],
+                          capture_output=True,
+                          text=True,
+                          timeout=10
+                      )
+                      if result.returncode == 0:
+                          logger.info(f"Wake packet sent to {mac_address}")
+                          return True, "Wake packet sent"
+                      else:
+                          logger.warning(f"Attempt {attempt + 1} failed: {result.stderr}")
+                  except subprocess.TimeoutExpired:
+                      logger.warning(f"Attempt {attempt + 1} timed out")
+                  except Exception as e:
+                      logger.error(f"Error sending wake packet: {e}")
+                  
+                  if attempt < retries - 1:
+                      import time
+                      time.sleep(WAKE_RETRY_DELAY)
+              
+              return False, "Failed to send wake packet after retries"
+          
+          def verify_node_awake(ip_address, timeout={{ wake_verification_timeout }}):
+              """Verify node is responding after wake."""
+              import time
+              start_time = time.time()
+              
+              while time.time() - start_time < timeout:
+                  try:
+                      result = subprocess.run(
+                          ['ping', '-c', '1', '-W', '2', ip_address],
+                          capture_output=True,
+                          timeout=5
+                      )
+                      if result.returncode == 0:
+                          return True
+                  except Exception:
+                      pass
+                  time.sleep(5)
+              
+              return False
+          
+          @app.route('/health', methods=['GET'])
+          def health():
+              """Health check endpoint."""
+              return jsonify({
+                  'status': 'healthy',
+                  'timestamp': datetime.now().isoformat(),
+                  'service': 'vmstation-wake-handler'
+              })
+          
+          @app.route('/wake/<hostname>', methods=['POST'])
+          def wake_node(hostname):
+              """Wake a specific node."""
+              if not authenticate():
+                  return jsonify({'error': 'Unauthorized'}), 401
+              
+              registry = load_wol_registry()
+              
+              if hostname not in registry:
+                  return jsonify({'error': f'Unknown host: {hostname}'}), 404
+              
+              node_info = registry[hostname]
+              success, message = send_wake_packet(node_info['mac'])
+              
+              response = {
+                  'hostname': hostname,
+                  'mac': node_info['mac'],
+                  'success': success,
+                  'message': message,
+                  'timestamp': datetime.now().isoformat()
+              }
+              
+              # Optionally verify wake
+              if success and request.args.get('verify', 'false').lower() == 'true':
+                  if node_info.get('ip'):
+                      verified = verify_node_awake(node_info['ip'])
+                      response['verified'] = verified
+              
+              return jsonify(response), 200 if success else 500
+          
+          @app.route('/wake/all', methods=['POST'])
+          def wake_all():
+              """Wake all registered nodes."""
+              if not authenticate():
+                  return jsonify({'error': 'Unauthorized'}), 401
+              
+              registry = load_wol_registry()
+              results = []
+              
+              for hostname, node_info in registry.items():
+                  success, message = send_wake_packet(node_info['mac'])
+                  results.append({
+                      'hostname': hostname,
+                      'mac': node_info['mac'],
+                      'success': success,
+                      'message': message
+                  })
+              
+              return jsonify({
+                  'results': results,
+                  'timestamp': datetime.now().isoformat()
+              })
+          
+          @app.route('/status', methods=['GET'])
+          def cluster_status():
+              """Get cluster power status."""
+              registry = load_wol_registry()
+              status = []
+              
+              for hostname, node_info in registry.items():
+                  node_status = {
+                      'hostname': hostname,
+                      'mac': node_info['mac'],
+                      'ip': node_info.get('ip', ''),
+                      'reachable': False
+                  }
+                  
+                  if node_info.get('ip'):
+                      try:
+                          result = subprocess.run(
+                              ['ping', '-c', '1', '-W', '1', node_info['ip']],
+                              capture_output=True,
+                              timeout=3
+                          )
+                          node_status['reachable'] = result.returncode == 0
+                      except Exception:
+                          pass
+                  
+                  status.append(node_status)
+              
+              return jsonify({
+                  'nodes': status,
+                  'timestamp': datetime.now().isoformat()
+              })
+          
+          if __name__ == '__main__':
+              logger.info("Starting VMStation Wake Event Handler")
+              app.run(
+                  host='{{ wake_handler_bind }}',
+                  port={{ wake_handler_port }},
+                  debug=False
+              )
+        dest: "{{ handler_dir }}/wake-handler.py"
+        owner: root
+        group: root
+        mode: "0755"
+      notify: Restart wake handler
+      tags:
+        - handler
+
+    # Deploy systemd service
+    - name: Deploy wake handler systemd service
+      ansible.builtin.template:
+        src: wake-event.service.j2
+        dest: /etc/systemd/system/vmstation-wake-event.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify:
+        - Reload systemd
+        - Restart wake handler
+      tags:
+        - systemd
+
+    # Enable and start service
+    - name: Enable and start wake handler
+      ansible.builtin.systemd:
+        name: vmstation-wake-event.service
+        state: started
+        enabled: true
+        daemon_reload: true
+      tags:
+        - systemd
+
+    # Configure firewall
+    - name: Allow wake handler port in firewall (firewalld)
+      ansible.posix.firewalld:
+        port: "{{ wake_handler_port }}/tcp"
+        permanent: true
+        state: enabled
+        immediate: true
+      when: ansible_facts.services['firewalld.service'] is defined
+      failed_when: false
+      tags:
+        - firewall
+
+    - name: Allow wake handler port in firewall (ufw)
+      community.general.ufw:
+        rule: allow
+        port: "{{ wake_handler_port }}"
+        proto: tcp
+      when: ansible_facts.services['ufw.service'] is defined
+      failed_when: false
+      tags:
+        - firewall
+
+    # Verify deployment
+    - name: Wait for wake handler to start
+      ansible.builtin.wait_for:
+        port: "{{ wake_handler_port }}"
+        timeout: 30
+      tags:
+        - verify
+
+    - name: Test wake handler health endpoint
+      ansible.builtin.uri:
+        url: "http://localhost:{{ wake_handler_port }}/health"
+        method: GET
+        return_content: true
+      register: health_check
+      tags:
+        - verify
+
+    - name: Display health check result
+      ansible.builtin.debug:
+        msg: "Wake handler health: {{ health_check.json }}"
+      tags:
+        - verify
+
+  post_tasks:
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg: |
+          Wake event handler deployed on {{ inventory_hostname }}
+          
+          Service: vmstation-wake-event.service
+          Port: {{ wake_handler_port }}
+          
+          Endpoints:
+            GET  http://{{ ansible_host }}:{{ wake_handler_port }}/health
+            POST http://{{ ansible_host }}:{{ wake_handler_port }}/wake/<hostname>
+            POST http://{{ ansible_host }}:{{ wake_handler_port }}/wake/all
+            GET  http://{{ ansible_host }}:{{ wake_handler_port }}/status
+          
+          {% if wake_auth_enabled %}
+          Authentication required. Include header:
+            X-Auth-Token: <token>
+          {% endif %}
+          
+          Logs: journalctl -u vmstation-wake-event.service
