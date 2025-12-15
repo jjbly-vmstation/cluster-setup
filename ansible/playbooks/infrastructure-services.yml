@@ -171,6 +171,18 @@
       tags:
         - dns
     
+
+    - name: Fail if dns_nameservers or dns_search_domains are undefined or empty
+      ansible.builtin.fail:
+        msg: >-
+          dns_nameservers and dns_search_domains must be defined and non-empty to configure /etc/resolv.conf directly.
+          Set these variables in your inventory or group_vars.
+      when: (not use_systemd_resolved or not resolved_conf.stat.exists) and
+            (dns_nameservers is not defined or dns_nameservers|length == 0 or
+             dns_search_domains is not defined or dns_search_domains|length == 0)
+      tags:
+        - dns
+
     - name: Configure /etc/resolv.conf directly (if not using systemd-resolved)
       ansible.builtin.template:
         dest: /etc/resolv.conf
@@ -185,7 +197,9 @@
         owner: root
         group: root
         mode: "0644"
-      when: not use_systemd_resolved or not resolved_conf.stat.exists
+      when: (not use_systemd_resolved or not resolved_conf.stat.exists) and
+            dns_nameservers is defined and dns_nameservers|length > 0 and
+            dns_search_domains is defined and dns_search_domains|length > 0
       tags:
         - dns
     
