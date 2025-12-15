@@ -227,7 +227,11 @@
               sharedscripts
               maxsize {{ log_max_size_mb }}M
               postrotate
-                  /usr/lib/rsyslog/rsyslog-rotate
+                  {% if ansible_os_family == "Debian" %}
+                  [ -f /var/run/rsyslogd.pid ] && /usr/bin/killall -HUP rsyslogd || true
+                  {% else %}
+                  /bin/systemctl reload-or-restart rsyslog > /dev/null 2>&1 || true
+                  {% endif %}
               endscript
           }
         owner: root
@@ -414,9 +418,16 @@
     
     - name: Install kubectl (if not present)
       block:
+        - name: Get latest stable kubectl version (Debian/Ubuntu)
+          ansible.builtin.uri:
+            url: https://dl.k8s.io/release/stable.txt
+            return_content: yes
+          register: kubectl_version
+          when: ansible_os_family == "Debian"
+        
         - name: Download kubectl binary (Debian/Ubuntu)
           ansible.builtin.get_url:
-            url: "https://dl.k8s.io/release/v{{ k8s_version | default('1.29') }}.0/bin/linux/amd64/kubectl"
+            url: "https://dl.k8s.io/release/{{ kubectl_version.content | trim }}/bin/linux/amd64/kubectl"
             dest: /usr/local/bin/kubectl
             mode: "0755"
           when: ansible_os_family == "Debian"

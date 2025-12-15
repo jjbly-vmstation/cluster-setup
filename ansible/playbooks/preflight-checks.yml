@@ -441,17 +441,25 @@
         
         - name: Validate sysctl parameters
           ansible.builtin.set_fact:
-            sysctl_mismatch: "{{ sysctl_results.results | selectattr('stdout', 'ne', item.value) | map(attribute='item.key') | list }}"
+            sysctl_mismatch: "{{ sysctl_results.results | rejectattr('stdout', 'equalto', expected_sysctl[item.item.key]) | map(attribute='item.key') | list }}"
+          vars:
+            item: "{{ sysctl_results.results | first }}"
+        
+        - name: Build list of mismatched sysctl parameters
+          ansible.builtin.set_fact:
+            sysctl_mismatch_list: "{{ sysctl_mismatch_list | default([]) + [item.item.key] }}"
+          loop: "{{ sysctl_results.results }}"
+          when: item.stdout != expected_sysctl[item.item.key]
         
         - name: Record sysctl check
           ansible.builtin.set_fact:
             check_results: "{{ check_results | combine({'passed': check_results.passed + ['All sysctl parameters configured correctly']}) }}"
-          when: sysctl_mismatch | length == 0
+          when: sysctl_mismatch_list | default([]) | length == 0
         
         - name: Record sysctl mismatches
           ansible.builtin.set_fact:
-            check_results: "{{ check_results | combine({'failed': check_results.failed + ['Sysctl mismatches: ' + sysctl_mismatch | join(', ')]}) }}"
-          when: sysctl_mismatch | length > 0
+            check_results: "{{ check_results | combine({'failed': check_results.failed + ['Sysctl mismatches: ' + (sysctl_mismatch_list | default([]) | join(', '))]}) }}"
+          when: sysctl_mismatch_list | default([]) | length > 0
       tags:
         - kernel
     
