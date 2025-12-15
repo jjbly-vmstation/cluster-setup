@@ -114,7 +114,6 @@
     # System users for monitoring services
     system_users:
       - name: prometheus
-        uid: 65534
         home: /var/lib/prometheus
         shell: /usr/sbin/nologin
       - name: grafana
@@ -129,8 +128,8 @@
     # Monitoring data directories
     monitoring_directories:
       - path: /data/monitoring/prometheus
-        owner: 65534
-        group: 65534
+        owner: prometheus
+        group: prometheus
         mode: "0755"
       - path: /data/monitoring/grafana
         owner: 472
@@ -141,8 +140,8 @@
         group: 10001
         mode: "0755"
       - path: /data/monitoring/alertmanager
-        owner: 65534
-        group: 65534
+        owner: prometheus
+        group: prometheus
         mode: "0755"
     
     # Application directories
@@ -465,7 +464,7 @@
     - name: Create system groups for monitoring services
       ansible.builtin.group:
         name: "{{ item.name }}"
-        gid: "{{ item.uid }}"
+        gid: "{{ item.uid | default(omit) }}"
         system: yes
         state: present
       loop: "{{ system_users }}"
@@ -475,7 +474,7 @@
     - name: Create system users for monitoring services
       ansible.builtin.user:
         name: "{{ item.name }}"
-        uid: "{{ item.uid }}"
+        uid: "{{ item.uid | default(omit) }}"
         group: "{{ item.name }}"
         home: "{{ item.home }}"
         shell: "{{ item.shell }}"
