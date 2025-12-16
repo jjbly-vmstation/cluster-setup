@@ -1,0 +1,7 @@
+# VMStation DNS Configuration
+{% for domain in dns_search_domains %}
+search {{ domain }}
+{% endfor %}
+{% for ns in dns_nameservers %}
+nameserver {{ ns }}
+{% endfor %}

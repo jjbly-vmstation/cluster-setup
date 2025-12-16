@@ -184,16 +184,9 @@
         - dns
 
     - name: Configure /etc/resolv.conf directly (if not using systemd-resolved)
-      ansible.builtin.copy:
+      ansible.builtin.template:
+        src: templates/resolv.conf.j2
         dest: /etc/resolv.conf
-        content: |
-          # VMStation DNS Configuration
-          {% for domain in dns_search_domains %}
-          search {{ domain }}
-          {% endfor %}
-          {% for ns in dns_nameservers %}
-          nameserver {{ ns }}
-          {% endfor %}
         owner: root
         group: root
         mode: "0644"
