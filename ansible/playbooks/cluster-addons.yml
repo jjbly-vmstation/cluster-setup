@@ -1,23 +1,29 @@
 ---
-# cluster-addons.yml - Post-Kubernetes Cluster Add-ons Deployment and Validation
+# cluster-addons.yml - Post-Kubernetes Cluster Add-ons Validation and Optional Deployment
 # Part of VMStation Cluster Setup
 #
 # IMPORTANT: This playbook assumes Kubernetes is already deployed via Kubespray
 # DO NOT run this before Kubernetes deployment
 #
 # This playbook:
-# - Validates existing Calico CNI installation
-# - Validates CoreDNS functionality
+# - Validates existing Calico CNI installation (already deployed by Kubespray)
+# - Validates CoreDNS functionality (already deployed by Kubespray)
+# - Detects and warns about legacy CNI components (Flannel, Weave)
 # - Optionally deploys metrics-server for resource metrics
 # - Optionally deploys local-path-provisioner for dynamic storage
 # - Validates cluster networking and node readiness
-# - Ensures no legacy CNI components exist
+#
+# What this playbook does NOT do:
+# - Does NOT deploy or configure Calico CNI (already handled by Kubespray)
+# - Does NOT deploy CoreDNS (already handled by Kubespray)
+# - Does NOT modify CNI configuration
 #
 # Prerequisites:
 # - Kubernetes cluster must be running (deployed via Kubespray)
+# - Calico CNI must already be deployed and running
+# - CoreDNS must already be deployed and running
 # - containerd must be configured and running
 # - kubectl must be available on control plane node
-# - Calico CNI should already be deployed
 #
 # Usage:
 #   ansible-playbook -i ansible/inventory/hosts.yml playbooks/cluster-addons.yml
@@ -38,34 +44,27 @@
 # - No destructive actions performed
 # - Does NOT reset, re-initialize, or disrupt existing cluster
 # - Does NOT restart kubelet or containerd unnecessarily
+# - Does NOT deploy or modify CNI configuration
 
-- name: Deploy and Validate Cluster Add-ons (Post-Kubernetes)
+- name: Validate Cluster Add-ons and Deploy Optional Components (Post-Kubernetes)
   hosts: kube-master
   become: true
   gather_facts: true
   
   vars:
-    # CNI Configuration (from inventory)
-    cni_plugin: "{{ hostvars[inventory_hostname].cni_plugin | default('calico') }}"
-    pod_network_cidr: "{{ hostvars[inventory_hostname].pod_network_cidr | default('10.244.0.0/16') }}"
-    
-    # Calico versions (for reference and potential deployment)
-    calico_operator_version: "v3.27.0"
-    calico_manifest_url: "https://raw.githubusercontent.com/projectcalico/calico/{{ calico_operator_version }}/manifests"
-    
     # Optional components (set to false by default for safety)
     deploy_metrics_server: false
     deploy_local_path_provisioner: false
-    
+
     # Metrics server configuration
     metrics_server_version: "v0.7.0"
     metrics_server_manifest_url: "https://github.com/kubernetes-sigs/metrics-server/releases/download/{{ metrics_server_version }}/components.yaml"
-    
+
     # Local path provisioner configuration
     local_path_provisioner_version: "v0.0.26"
     local_path_provisioner_manifest_url: "https://raw.githubusercontent.com/rancher/local-path-provisioner/{{ local_path_provisioner_version }}/deploy/local-path-storage.yaml"
     local_path_storage_path: "/opt/local-path-provisioner"
-    
+
     # Validation settings
     pod_ready_timeout: 300
     pod_check_retries: 30
@@ -203,10 +202,11 @@
         - validation
     
     - name: Calico - Warn if Calico is not deployed
-      ansible.builtin.fail:
-        msg: "WARNING: Calico CNI is not deployed. This cluster requires Calico for proper networking."
-      when: calico_daemonset.resources | length == 0
-      ignore_errors: true
+      ansible.builtin.assert:
+        that:
+          - calico_daemonset.resources | length > 0
+        fail_msg: "WARNING: Calico CNI is not deployed. This cluster requires Calico for proper networking."
+        success_msg: "Calico CNI is properly deployed"
       tags:
         - calico
         - validation
@@ -309,7 +309,7 @@
         - validation
     
     - name: CoreDNS - Test DNS resolution
-      ansible.builtin.command: kubectl run dns-test --image=busybox:1.36 --rm -it --restart=Never --command -- nslookup kubernetes.default
+      ansible.builtin.command: kubectl run dns-test --image=busybox:1.36 --rm --restart=Never --command -- nslookup kubernetes.default
       register: dns_test
       changed_when: false
       failed_when: false
@@ -479,12 +479,18 @@
       tags:
         - validation
     
+    - name: Validation - Count Ready nodes
+      ansible.builtin.set_fact:
+        ready_nodes: "{{ nodes_status.items | selectattr('status.conditions', 'defined') | map(attribute='status.conditions') | flatten | selectattr('type', 'equalto', 'Ready') | selectattr('status', 'equalto', 'True') | list | length }}"
+      tags:
+        - validation
+
     - name: Validation - Check all nodes are Ready
       ansible.builtin.assert:
         that:
           - nodes_status.items | length > 0
-          - nodes_status.items | selectattr('status.conditions', 'defined') | selectattr('status.conditions', 'search', 'Ready.*True') | list | length == nodes_status.items | length
-        fail_msg: "Not all nodes are in Ready state"
+          - ready_nodes | int == nodes_status.items | length
+        fail_msg: "Not all nodes are in Ready state ({{ ready_nodes }}/{{ nodes_status.items | length }} ready)"
         success_msg: "All {{ nodes_status.items | length }} nodes are Ready"
       tags:
         - validation
@@ -499,9 +505,7 @@
     
     - name: Validation - Display pod network CIDR
       ansible.builtin.debug:
-        msg:
-          - "Configured pod network CIDR: {{ pod_network_cidr }}"
-          - "Actual cluster pod CIDR: {{ actual_pod_cidr.stdout | default('Unable to detect') }}"
+        msg: "Cluster pod network CIDR: {{ actual_pod_cidr.stdout | default('Unable to detect') }}"
       tags:
         - validation
     
@@ -542,7 +546,7 @@
         - validation
     
     - name: Validation - Test pod-to-pod connectivity
-      ansible.builtin.command: kubectl run connectivity-test --image=busybox:1.36 --rm -it --restart=Never --command -- ping -c 3 8.8.8.8
+      ansible.builtin.command: kubectl run connectivity-test --image=busybox:1.36 --rm --restart=Never --command -- ping -c 3 8.8.8.8
       register: connectivity_test
       changed_when: false
       failed_when: false
