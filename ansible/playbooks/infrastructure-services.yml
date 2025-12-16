@@ -350,6 +350,7 @@
         state: present
       loop:
         - name: prometheus
+          uid: 2010
         - name: grafana
           uid: 472
         - name: loki
@@ -367,7 +368,7 @@
         create_home: no
         state: present
       loop:
-        - { name: 'prometheus' }
+        - { name: 'prometheus', uid: 2010 }
         - { name: 'grafana', uid: 472 }
         - { name: 'loki', uid: 10001 }
       tags:
