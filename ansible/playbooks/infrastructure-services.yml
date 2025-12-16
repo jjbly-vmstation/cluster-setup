@@ -185,7 +185,7 @@
 
     - name: Configure /etc/resolv.conf directly (if not using systemd-resolved)
       ansible.builtin.template:
-        src: templates/resolv.conf.j2
+        src: ../templates/resolv.conf.j2
         dest: /etc/resolv.conf
         owner: root
         group: root
