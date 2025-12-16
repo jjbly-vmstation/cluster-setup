@@ -1,3 +1,15 @@
+# ----------------------------------------------------------------------
+# journald.conf setup instructions:
+#
+# - The playbook ensures /etc/systemd/journald.conf exists and sets key retention options:
+#     SystemMaxUse=500M
+#     SystemMaxFileSize=50M
+#     MaxRetentionSec={{ log_retention_days * 86400 }}
+#
+# - To customize, override these values in your inventory/group_vars/host_vars or edit the playbook vars.
+# - For more options, see 'man journald.conf'.
+# - After changes, run 'systemctl restart systemd-journald' or reboot to apply.
+#
 ---
 # infrastructure-services.yml - Infrastructure Services Deployment
 # Part of VMStation Cluster Setup
@@ -218,6 +230,18 @@
       tags:
         - logging
     
+    
+    - name: Ensure journald.conf exists
+      ansible.builtin.file:
+        path: /etc/systemd/journald.conf
+        state: touch
+        owner: root
+        group: root
+        mode: '0644'
+      tags:
+        - logging
+
+    
     - name: Configure journald retention
       ansible.builtin.lineinfile:
         path: /etc/systemd/journald.conf
@@ -235,6 +259,7 @@
       tags:
         - logging
     
+   
     - name: Configure remote syslog forwarding (if central server defined)
       ansible.builtin.blockinfile:
         path: /etc/rsyslog.d/50-central-logging.conf
@@ -325,11 +350,26 @@
         state: present
       loop:
         - name: prometheus
-          uid: 65534
         - name: grafana
           uid: 472
         - name: loki
           uid: 10001
+      tags:
+        - monitoring
+    
+    - name: Ensure monitoring system users exist
+      ansible.builtin.user:
+        name: "{{ item.name }}"
+        # Only specify UID for grafana and loki, not prometheus
+        uid: "{{ item.uid | default(omit) }}"
+        system: yes
+        shell: /usr/sbin/nologin
+        create_home: no
+        state: present
+      loop:
+        - { name: 'prometheus' }
+        - { name: 'grafana', uid: 472 }
+        - { name: 'loki', uid: 10001 }
       tags:
         - monitoring
     
