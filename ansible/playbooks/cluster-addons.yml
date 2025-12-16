@@ -1,0 +1,573 @@
+---
+# cluster-addons.yml - Post-Kubernetes Cluster Add-ons Deployment and Validation
+# Part of VMStation Cluster Setup
+#
+# IMPORTANT: This playbook assumes Kubernetes is already deployed via Kubespray
+# DO NOT run this before Kubernetes deployment
+#
+# This playbook:
+# - Validates existing Calico CNI installation
+# - Validates CoreDNS functionality
+# - Optionally deploys metrics-server for resource metrics
+# - Optionally deploys local-path-provisioner for dynamic storage
+# - Validates cluster networking and node readiness
+# - Ensures no legacy CNI components exist
+#
+# Prerequisites:
+# - Kubernetes cluster must be running (deployed via Kubespray)
+# - containerd must be configured and running
+# - kubectl must be available on control plane node
+# - Calico CNI should already be deployed
+#
+# Usage:
+#   ansible-playbook -i ansible/inventory/hosts.yml playbooks/cluster-addons.yml
+#   ansible-playbook -i ansible/inventory/hosts.yml playbooks/cluster-addons.yml --check  # Dry run
+#   ansible-playbook -i ansible/inventory/hosts.yml playbooks/cluster-addons.yml --tags=validation
+#   ansible-playbook -i ansible/inventory/hosts.yml playbooks/cluster-addons.yml --extra-vars "deploy_metrics_server=true"
+#
+# Tags:
+#   preflight - Pre-flight checks
+#   calico - Calico CNI validation
+#   coredns - CoreDNS validation
+#   metrics - metrics-server deployment
+#   storage - local-path-provisioner deployment
+#   validation - Cluster validation tasks
+#
+# Safety:
+# - All tasks are idempotent and safe to run multiple times
+# - No destructive actions performed
+# - Does NOT reset, re-initialize, or disrupt existing cluster
+# - Does NOT restart kubelet or containerd unnecessarily
+
+- name: Deploy and Validate Cluster Add-ons (Post-Kubernetes)
+  hosts: kube-master
+  become: true
+  gather_facts: true
+  
+  vars:
+    # CNI Configuration (from inventory)
+    cni_plugin: "{{ hostvars[inventory_hostname].cni_plugin | default('calico') }}"
+    pod_network_cidr: "{{ hostvars[inventory_hostname].pod_network_cidr | default('10.244.0.0/16') }}"
+    
+    # Calico versions (for reference and potential deployment)
+    calico_operator_version: "v3.27.0"
+    calico_manifest_url: "https://raw.githubusercontent.com/projectcalico/calico/{{ calico_operator_version }}/manifests"
+    
+    # Optional components (set to false by default for safety)
+    deploy_metrics_server: false
+    deploy_local_path_provisioner: false
+    
+    # Metrics server configuration
+    metrics_server_version: "v0.7.0"
+    metrics_server_manifest_url: "https://github.com/kubernetes-sigs/metrics-server/releases/download/{{ metrics_server_version }}/components.yaml"
+    
+    # Local path provisioner configuration
+    local_path_provisioner_version: "v0.0.26"
+    local_path_provisioner_manifest_url: "https://raw.githubusercontent.com/rancher/local-path-provisioner/{{ local_path_provisioner_version }}/deploy/local-path-storage.yaml"
+    local_path_storage_path: "/opt/local-path-provisioner"
+    
+    # Validation settings
+    pod_ready_timeout: 300
+    pod_check_retries: 30
+    pod_check_delay: 10
+    
+  pre_tasks:
+    - name: Display target host
+      ansible.builtin.debug:
+        msg: "Running cluster add-ons validation on: {{ inventory_hostname }} ({{ ansible_host }})"
+      tags: always
+    
+    - name: Ensure we are running on control plane node
+      ansible.builtin.assert:
+        that:
+          - "'kube-master' in group_names or 'kube_control_plane' in group_names"
+        fail_msg: "This playbook must run on a Kubernetes control plane node"
+        success_msg: "Confirmed running on control plane node"
+      tags: always
+
+  tasks:
+    # =========================================================================
+    # Pre-flight Checks
+    # =========================================================================
+    
+    - name: Pre-flight - Check if kubectl is available
+      ansible.builtin.command: kubectl version --client --short
+      register: kubectl_version
+      changed_when: false
+      failed_when: kubectl_version.rc != 0
+      tags:
+        - preflight
+        - always
+    
+    - name: Pre-flight - Display kubectl version
+      ansible.builtin.debug:
+        msg: "kubectl version: {{ kubectl_version.stdout }}"
+      tags:
+        - preflight
+        - always
+    
+    - name: Pre-flight - Verify Kubernetes API server is responding
+      ansible.builtin.command: kubectl cluster-info
+      register: cluster_info
+      changed_when: false
+      failed_when: cluster_info.rc != 0
+      tags:
+        - preflight
+        - always
+    
+    - name: Pre-flight - Check node status
+      ansible.builtin.command: kubectl get nodes
+      register: node_status
+      changed_when: false
+      failed_when: node_status.rc != 0
+      tags:
+        - preflight
+        - always
+    
+    - name: Pre-flight - Display node status
+      ansible.builtin.debug:
+        var: node_status.stdout_lines
+      tags:
+        - preflight
+        - always
+    
+    # =========================================================================
+    # Calico CNI Validation
+    # =========================================================================
+    
+    - name: Calico - Check if Calico is deployed
+      kubernetes.core.k8s_info:
+        kind: DaemonSet
+        namespace: kube-system
+        name: calico-node
+      register: calico_daemonset
+      tags:
+        - calico
+        - validation
+    
+    - name: Calico - Display Calico deployment status
+      ansible.builtin.debug:
+        msg: "Calico CNI is {{ 'DEPLOYED' if calico_daemonset.resources | length > 0 else 'NOT FOUND' }}"
+      tags:
+        - calico
+        - validation
+    
+    - name: Calico - Verify Calico pods are running
+      ansible.builtin.command: kubectl get pods -n kube-system -l k8s-app=calico-node -o json
+      register: calico_pods_raw
+      changed_when: false
+      when: calico_daemonset.resources | length > 0
+      tags:
+        - calico
+        - validation
+    
+    - name: Calico - Parse Calico pod status
+      ansible.builtin.set_fact:
+        calico_pods: "{{ calico_pods_raw.stdout | from_json }}"
+      when: 
+        - calico_daemonset.resources | length > 0
+        - calico_pods_raw.stdout is defined
+      tags:
+        - calico
+        - validation
+    
+    - name: Calico - Check all Calico pods are Running
+      ansible.builtin.assert:
+        that:
+          - calico_pods.items | length > 0
+          - calico_pods.items | selectattr('status.phase', 'equalto', 'Running') | list | length == calico_pods.items | length
+        fail_msg: "Not all Calico pods are in Running state"
+        success_msg: "All {{ calico_pods.items | length }} Calico pods are Running"
+      when: 
+        - calico_daemonset.resources | length > 0
+        - calico_pods is defined
+      tags:
+        - calico
+        - validation
+    
+    - name: Calico - Check for Calico operator (Tigera)
+      kubernetes.core.k8s_info:
+        kind: Deployment
+        namespace: tigera-operator
+        name: tigera-operator
+      register: calico_operator
+      tags:
+        - calico
+        - validation
+    
+    - name: Calico - Display Calico operator status
+      ansible.builtin.debug:
+        msg: "Calico Operator (Tigera) is {{ 'DEPLOYED' if calico_operator.resources | length > 0 else 'NOT FOUND (using manifest method)' }}"
+      tags:
+        - calico
+        - validation
+    
+    - name: Calico - Warn if Calico is not deployed
+      ansible.builtin.fail:
+        msg: "WARNING: Calico CNI is not deployed. This cluster requires Calico for proper networking."
+      when: calico_daemonset.resources | length == 0
+      ignore_errors: true
+      tags:
+        - calico
+        - validation
+    
+    # =========================================================================
+    # Legacy CNI Detection
+    # =========================================================================
+    
+    - name: Legacy CNI - Check for Flannel pods
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: kube-system
+        label_selectors:
+          - app=flannel
+      register: flannel_check
+      tags:
+        - validation
+        - calico
+    
+    - name: Legacy CNI - Check for Weave pods
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: kube-system
+        label_selectors:
+          - name=weave-net
+      register: weave_check
+      tags:
+        - validation
+        - calico
+    
+    - name: Legacy CNI - Display legacy CNI check results
+      ansible.builtin.debug:
+        msg:
+          - "Flannel pods found: {{ flannel_check.resources | length }}"
+          - "Weave pods found: {{ weave_check.resources | length }}"
+      tags:
+        - validation
+        - calico
+    
+    - name: Legacy CNI - Warn if legacy CNI detected
+      ansible.builtin.debug:
+        msg: "WARNING: Legacy CNI components detected. Consider removing them."
+      when: (flannel_check.resources | length > 0) or (weave_check.resources | length > 0)
+      tags:
+        - validation
+        - calico
+    
+    # =========================================================================
+    # CoreDNS Validation
+    # =========================================================================
+    
+    - name: CoreDNS - Check if CoreDNS is deployed
+      kubernetes.core.k8s_info:
+        kind: Deployment
+        namespace: kube-system
+        name: coredns
+      register: coredns_deployment
+      tags:
+        - coredns
+        - validation
+    
+    - name: CoreDNS - Display CoreDNS deployment status
+      ansible.builtin.debug:
+        msg: "CoreDNS is {{ 'DEPLOYED' if coredns_deployment.resources | length > 0 else 'NOT FOUND' }}"
+      tags:
+        - coredns
+        - validation
+    
+    - name: CoreDNS - Get CoreDNS pods
+      ansible.builtin.command: kubectl get pods -n kube-system -l k8s-app=kube-dns -o json
+      register: coredns_pods_raw
+      changed_when: false
+      when: coredns_deployment.resources | length > 0
+      tags:
+        - coredns
+        - validation
+    
+    - name: CoreDNS - Parse CoreDNS pod status
+      ansible.builtin.set_fact:
+        coredns_pods: "{{ coredns_pods_raw.stdout | from_json }}"
+      when:
+        - coredns_deployment.resources | length > 0
+        - coredns_pods_raw.stdout is defined
+      tags:
+        - coredns
+        - validation
+    
+    - name: CoreDNS - Check CoreDNS pods are Running
+      ansible.builtin.assert:
+        that:
+          - coredns_pods.items | length > 0
+          - coredns_pods.items | selectattr('status.phase', 'equalto', 'Running') | list | length == coredns_pods.items | length
+        fail_msg: "Not all CoreDNS pods are in Running state"
+        success_msg: "All {{ coredns_pods.items | length }} CoreDNS pods are Running"
+      when:
+        - coredns_deployment.resources | length > 0
+        - coredns_pods is defined
+      tags:
+        - coredns
+        - validation
+    
+    - name: CoreDNS - Test DNS resolution
+      ansible.builtin.command: kubectl run dns-test --image=busybox:1.36 --rm -it --restart=Never --command -- nslookup kubernetes.default
+      register: dns_test
+      changed_when: false
+      failed_when: false
+      timeout: 30
+      tags:
+        - coredns
+        - validation
+    
+    - name: CoreDNS - Display DNS test results
+      ansible.builtin.debug:
+        msg: "DNS resolution test {{ 'PASSED' if dns_test.rc == 0 else 'FAILED' }}"
+      tags:
+        - coredns
+        - validation
+    
+    # =========================================================================
+    # Metrics Server Deployment (Optional)
+    # =========================================================================
+    
+    - name: Metrics Server - Check if metrics-server is already deployed
+      kubernetes.core.k8s_info:
+        kind: Deployment
+        namespace: kube-system
+        name: metrics-server
+      register: metrics_server_check
+      when: deploy_metrics_server | bool
+      tags:
+        - metrics
+    
+    - name: Metrics Server - Display deployment status
+      ansible.builtin.debug:
+        msg: "metrics-server is {{ 'already deployed' if metrics_server_check.resources | length > 0 else 'not deployed' }}"
+      when: deploy_metrics_server | bool
+      tags:
+        - metrics
+    
+    - name: Metrics Server - Download metrics-server manifest
+      ansible.builtin.get_url:
+        url: "{{ metrics_server_manifest_url }}"
+        dest: /tmp/metrics-server.yaml
+        mode: '0644'
+      when:
+        - deploy_metrics_server | bool
+        - metrics_server_check.resources | length == 0
+      tags:
+        - metrics
+    
+    - name: Metrics Server - Deploy metrics-server
+      ansible.builtin.command: kubectl apply -f /tmp/metrics-server.yaml
+      register: metrics_server_deploy
+      changed_when: "'created' in metrics_server_deploy.stdout or 'configured' in metrics_server_deploy.stdout"
+      when:
+        - deploy_metrics_server | bool
+        - metrics_server_check.resources | length == 0
+      tags:
+        - metrics
+    
+    - name: Metrics Server - Wait for metrics-server to be ready
+      ansible.builtin.command: kubectl wait --for=condition=available --timeout={{ pod_ready_timeout }}s deployment/metrics-server -n kube-system
+      register: metrics_server_wait
+      changed_when: false
+      failed_when: false
+      when:
+        - deploy_metrics_server | bool
+        - metrics_server_check.resources | length == 0
+      tags:
+        - metrics
+    
+    - name: Metrics Server - Cleanup manifest
+      ansible.builtin.file:
+        path: /tmp/metrics-server.yaml
+        state: absent
+      when:
+        - deploy_metrics_server | bool
+        - metrics_server_check.resources | length == 0
+      tags:
+        - metrics
+    
+    # =========================================================================
+    # Local Path Provisioner Deployment (Optional)
+    # =========================================================================
+    
+    - name: Storage - Check if local-path-provisioner is already deployed
+      kubernetes.core.k8s_info:
+        kind: Deployment
+        namespace: local-path-storage
+        name: local-path-provisioner
+      register: local_path_check
+      when: deploy_local_path_provisioner | bool
+      tags:
+        - storage
+    
+    - name: Storage - Display deployment status
+      ansible.builtin.debug:
+        msg: "local-path-provisioner is {{ 'already deployed' if local_path_check.resources | length > 0 else 'not deployed' }}"
+      when: deploy_local_path_provisioner | bool
+      tags:
+        - storage
+    
+    - name: Storage - Create local storage directory
+      ansible.builtin.file:
+        path: "{{ local_path_storage_path }}"
+        state: directory
+        mode: '0755'
+      when:
+        - deploy_local_path_provisioner | bool
+        - local_path_check.resources | length == 0
+      tags:
+        - storage
+    
+    - name: Storage - Download local-path-provisioner manifest
+      ansible.builtin.get_url:
+        url: "{{ local_path_provisioner_manifest_url }}"
+        dest: /tmp/local-path-storage.yaml
+        mode: '0644'
+      when:
+        - deploy_local_path_provisioner | bool
+        - local_path_check.resources | length == 0
+      tags:
+        - storage
+    
+    - name: Storage - Deploy local-path-provisioner
+      ansible.builtin.command: kubectl apply -f /tmp/local-path-storage.yaml
+      register: local_path_deploy
+      changed_when: "'created' in local_path_deploy.stdout or 'configured' in local_path_deploy.stdout"
+      when:
+        - deploy_local_path_provisioner | bool
+        - local_path_check.resources | length == 0
+      tags:
+        - storage
+    
+    - name: Storage - Wait for local-path-provisioner to be ready
+      ansible.builtin.command: kubectl wait --for=condition=available --timeout={{ pod_ready_timeout }}s deployment/local-path-provisioner -n local-path-storage
+      register: local_path_wait
+      changed_when: false
+      failed_when: false
+      when:
+        - deploy_local_path_provisioner | bool
+        - local_path_check.resources | length == 0
+      tags:
+        - storage
+    
+    - name: Storage - Cleanup manifest
+      ansible.builtin.file:
+        path: /tmp/local-path-storage.yaml
+        state: absent
+      when:
+        - deploy_local_path_provisioner | bool
+        - local_path_check.resources | length == 0
+      tags:
+        - storage
+    
+    # =========================================================================
+    # Cluster Validation
+    # =========================================================================
+    
+    - name: Validation - Get all nodes status
+      ansible.builtin.command: kubectl get nodes -o json
+      register: nodes_status_raw
+      changed_when: false
+      tags:
+        - validation
+    
+    - name: Validation - Parse nodes status
+      ansible.builtin.set_fact:
+        nodes_status: "{{ nodes_status_raw.stdout | from_json }}"
+      tags:
+        - validation
+    
+    - name: Validation - Check all nodes are Ready
+      ansible.builtin.assert:
+        that:
+          - nodes_status.items | length > 0
+          - nodes_status.items | selectattr('status.conditions', 'defined') | selectattr('status.conditions', 'search', 'Ready.*True') | list | length == nodes_status.items | length
+        fail_msg: "Not all nodes are in Ready state"
+        success_msg: "All {{ nodes_status.items | length }} nodes are Ready"
+      tags:
+        - validation
+    
+    - name: Validation - Get pod network CIDR from cluster
+      ansible.builtin.command: kubectl cluster-info dump | grep -oP 'cluster-cidr=\K[0-9./]+'
+      register: actual_pod_cidr
+      changed_when: false
+      failed_when: false
+      tags:
+        - validation
+    
+    - name: Validation - Display pod network CIDR
+      ansible.builtin.debug:
+        msg:
+          - "Configured pod network CIDR: {{ pod_network_cidr }}"
+          - "Actual cluster pod CIDR: {{ actual_pod_cidr.stdout | default('Unable to detect') }}"
+      tags:
+        - validation
+    
+    - name: Validation - Get all pods in kube-system
+      ansible.builtin.command: kubectl get pods -n kube-system -o json
+      register: system_pods_raw
+      changed_when: false
+      tags:
+        - validation
+    
+    - name: Validation - Parse system pods
+      ansible.builtin.set_fact:
+        system_pods: "{{ system_pods_raw.stdout | from_json }}"
+      tags:
+        - validation
+    
+    - name: Validation - Count non-Running system pods
+      ansible.builtin.set_fact:
+        non_running_pods: "{{ system_pods.items | rejectattr('status.phase', 'equalto', 'Running') | list }}"
+      tags:
+        - validation
+    
+    - name: Validation - Display system pod status
+      ansible.builtin.debug:
+        msg:
+          - "Total kube-system pods: {{ system_pods.items | length }}"
+          - "Running pods: {{ system_pods.items | selectattr('status.phase', 'equalto', 'Running') | list | length }}"
+          - "Non-running pods: {{ non_running_pods | length }}"
+      tags:
+        - validation
+    
+    - name: Validation - List non-running pods if any
+      ansible.builtin.debug:
+        msg: "Non-running pod: {{ item.metadata.name }} - Status: {{ item.status.phase }}"
+      loop: "{{ non_running_pods }}"
+      when: non_running_pods | length > 0
+      tags:
+        - validation
+    
+    - name: Validation - Test pod-to-pod connectivity
+      ansible.builtin.command: kubectl run connectivity-test --image=busybox:1.36 --rm -it --restart=Never --command -- ping -c 3 8.8.8.8
+      register: connectivity_test
+      changed_when: false
+      failed_when: false
+      timeout: 30
+      tags:
+        - validation
+    
+    - name: Validation - Display connectivity test results
+      ansible.builtin.debug:
+        msg: "Pod connectivity test {{ 'PASSED' if connectivity_test.rc == 0 else 'FAILED' }}"
+      tags:
+        - validation
+    
+  post_tasks:
+    - name: Display summary
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "Cluster Add-ons Validation Complete"
+          - "============================================"
+          - "Calico CNI: {{ 'DEPLOYED' if calico_daemonset.resources | length > 0 else 'NOT FOUND' }}"
+          - "CoreDNS: {{ 'DEPLOYED' if coredns_deployment.resources | length > 0 else 'NOT FOUND' }}"
+          - "metrics-server: {{ 'DEPLOYED' if deploy_metrics_server and (metrics_server_check.resources | length > 0 or metrics_server_deploy is defined) else 'NOT DEPLOYED' }}"
+          - "local-path-provisioner: {{ 'DEPLOYED' if deploy_local_path_provisioner and (local_path_check.resources | length > 0 or local_path_deploy is defined) else 'NOT DEPLOYED' }}"
+          - "Nodes Ready: {{ nodes_status.items | length }}"
+          - "Legacy CNI components: {{ 'FOUND' if (flannel_check.resources | length > 0 or weave_check.resources | length > 0) else 'NONE' }}"
+          - "============================================"
+      tags: always

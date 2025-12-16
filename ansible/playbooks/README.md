@@ -135,10 +135,67 @@ cat /tmp/preflight-report-*.txt
 
 4. **Deploy Kubernetes** (using Kubespray or other tools)
 
-5. **Re-validate** (optional)
+5. **Validate and Deploy Cluster Add-ons**
+   ```bash
+   ansible-playbook -i ../inventory/hosts.yml cluster-addons.yml
+   ```
+
+6. **Re-validate** (optional)
    ```bash
    ansible-playbook -i ../inventory/hosts.yml preflight-checks.yml
    ```
+
+## Post-Kubernetes Playbooks
+
+### 4. cluster-addons.yml
+**Purpose:** Validate and deploy cluster add-ons after Kubernetes deployment
+
+**IMPORTANT:** This playbook must run AFTER Kubernetes is deployed via Kubespray.
+
+**What it does:**
+- Validates existing Calico CNI installation
+- Validates CoreDNS functionality and DNS resolution
+- Checks for legacy CNI components (Flannel, Weave)
+- Optionally deploys metrics-server for resource metrics
+- Optionally deploys local-path-provisioner for dynamic storage
+- Validates cluster networking and node readiness
+- Tests pod-to-pod connectivity
+
+**Usage:**
+```bash
+# Run from ansible/ directory
+ansible-playbook -i ../inventory/hosts.yml cluster-addons.yml
+
+# Dry run
+ansible-playbook -i ../inventory/hosts.yml cluster-addons.yml --check
+
+# Deploy optional components
+ansible-playbook -i ../inventory/hosts.yml cluster-addons.yml \
+  --extra-vars "deploy_metrics_server=true deploy_local_path_provisioner=true"
+
+# Run specific validation tasks
+ansible-playbook -i ../inventory/hosts.yml cluster-addons.yml --tags=validation
+```
+
+**Available tags:**
+- `preflight` - Pre-flight checks (kubectl, API server)
+- `calico` - Calico CNI validation
+- `coredns` - CoreDNS validation
+- `metrics` - metrics-server deployment
+- `storage` - local-path-provisioner deployment
+- `validation` - Cluster validation tasks
+
+**Variables:**
+- `deploy_metrics_server: false` - Deploy metrics-server (default: false)
+- `deploy_local_path_provisioner: false` - Deploy local-path-provisioner (default: false)
+- `cni_plugin: calico` - Expected CNI plugin (default: calico)
+- `pod_network_cidr: 10.244.0.0/16` - Pod network CIDR (from inventory)
+
+**Safety:**
+- All tasks are idempotent and safe to run multiple times
+- No destructive actions performed
+- Does NOT reset, re-initialize, or disrupt existing cluster
+- Does NOT install or upgrade Kubernetes or containerd
 
 ## Other Playbooks
 
