@@ -207,40 +207,11 @@
       tags:
         - logging
     
+
     - name: Configure log rotation for rsyslog
       ansible.builtin.template:
+        src: ../templates/logrotate_rsyslog.j2
         dest: /etc/logrotate.d/rsyslog
-        content: |
-          /var/log/syslog
-          /var/log/mail.info
-          /var/log/mail.warn
-          /var/log/mail.err
-          /var/log/mail.log
-          /var/log/daemon.log
-          /var/log/kern.log
-          /var/log/auth.log
-          /var/log/user.log
-          /var/log/lpr.log
-          /var/log/cron.log
-          /var/log/debug
-          /var/log/messages
-          {
-              rotate {{ log_retention_days }}
-              daily
-              missingok
-              notifempty
-              compress
-              delaycompress
-              sharedscripts
-              maxsize {{ log_max_size_mb }}M
-              postrotate
-                  {% if ansible_os_family == "Debian" %}
-                  [ -f /var/run/rsyslogd.pid ] && /usr/bin/killall -HUP rsyslogd || true
-                  {% else %}
-                  /bin/systemctl reload-or-restart rsyslog > /dev/null 2>&1 || true
-                  {% endif %}
-              endscript
-          }
         owner: root
         group: root
         mode: "0644"
