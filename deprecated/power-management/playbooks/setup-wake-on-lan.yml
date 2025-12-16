@@ -1,5 +1,0 @@
-# DEPRECATED: This playbook is no longer supported.
-# Purpose: Setup Wake-on-LAN for cluster nodes (legacy, unreliable)
-# Do not use in production. See README.md for details.
----
-# ...original playbook content would be here if retained for reference...
