@@ -1,3 +1,7 @@
 ---
-# Global group variables for VMStation cluster
-kerberos_server: masternode
+ansible_host: WSDC-Homelab.vmstation.local
+ansible_user: ansible_svc@vmstation.local
+ansible_connection: ssh
+ansible_shell_type: powershell
+# This bypasses your FreeIPA/SSSD proxy so it talks directly to Windows
+ansible_ssh_common_args: '-o ProxyCommand=none'
