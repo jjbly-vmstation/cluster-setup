@@ -1,0 +1,17 @@
+---
+# VMware Workstation API Credentials
+# These must match what you manually set via 'vmrest -C'
+vmws_user: "vmadmin"
+vmws_pass: ""  # Replace with your actual password
+
+# VMware REST API Connectivity
+vmrest_port: 8697
+vmrest_host: "0.0.0.0"
+
+# Terraform Paths & Variables
+# This ensures Terraform knows where to find the ISO and where to work
+terraform_dir: "/home/vmadmin/vmstation-org/cluster-vm-thinclient/terraform"
+iso_path: "/home/vmadmin/iso/en-us_windows_11_business_editions_version_25h2_updated_feb_2026_x64_dvd_9271bf68.iso"
+
+# Workstation Specifics
+vm_admin_user: "vmadmin"
